@@ -1,7 +1,7 @@
 {
   "name": "musubi-claude",
   "displayName": "Musubi Memory (Claude Code)",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "First-class Claude Code adapter for Musubi memory: recall that runs before Claude answers, memory that survives /compact, live thoughts from other agents, automatic capture with verified delivery, recall tools, a memory steward and an honest health check. Shadow-only by default: nothing is written to Musubi, and prompts are never sent as searches, until delivery_mode is set to verified.",
   "author": {
     "name": "Eric Mey",

@@ -5,6 +5,21 @@ All notable changes to `musubi-claude` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/sourceblender/musubi-claude/compare/v0.5.0...v0.6.0) (2026-09-26)
+
+
+### Features
+
+* a seat whose launcher sets its identity owns identity, transport and binaries ([#30](https://github.com/sourceblender/musubi-claude/issues/30)) ([241130e](https://github.com/sourceblender/musubi-claude/commit/241130efdfcb45129f91aff604dd9775dab83057))
+* SessionStart names a token for another seat, before the drain fails ([#29](https://github.com/sourceblender/musubi-claude/issues/29)) ([c0c790e](https://github.com/sourceblender/musubi-claude/commit/c0c790eb4c28b73cfc0399e185443c4e40fcdf0d))
+* the Stop hook drains a backlog, not one row per turn ([#25](https://github.com/sourceblender/musubi-claude/issues/25)) ([a5715e2](https://github.com/sourceblender/musubi-claude/commit/a5715e23e395edf07e7b3142608313041e08a944))
+
+
+### Bug Fixes
+
+* a drain that makes no progress is recorded, not silent ([#28](https://github.com/sourceblender/musubi-claude/issues/28)) ([b5a9798](https://github.com/sourceblender/musubi-claude/commit/b5a979818a98f118fbb67e3cace55ce21e522227))
+* the SessionStart token warning cannot be forged and points where this seat's token comes from ([#31](https://github.com/sourceblender/musubi-claude/issues/31)) ([fec45de](https://github.com/sourceblender/musubi-claude/commit/fec45deff57fdf54a66ea3cf42ef0057f68ea630))
+
 ## [0.5.0](https://github.com/sourceblender/musubi-claude/compare/v0.4.0...v0.5.0) (2026-09-26)
 
 
