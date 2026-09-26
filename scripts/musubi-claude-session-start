@@ -8,15 +8,18 @@ hook's stdout as session context; this binding only prints that shared block.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
-import re
 import subprocess  # re-exported for adapter tests and fault injection
-from typing import Any
 
 from musubi_claude_runtime import runtime, settings_source
 from musubi_harness.plugin_continuity import MAX_CONTENT, MAX_ROWS, PluginContinuity
+
+try:
+    from musubi_harness.tokens import token_presence_problems
+except ImportError:  # harness < 1.4.0: the minimum stays 1.1.1, so this diagnostic
+    # waits for the next setup run instead of forcing one (Aoi's review, as in #27).
+    token_presence_problems = None
 
 
 _continuity = PluginContinuity(runtime)
@@ -25,111 +28,25 @@ _rows = _continuity._rows
 _compact = _continuity._compact
 
 
-def _claims(token: str) -> dict[str, Any] | None:
-    """The token's JWT claims, decoded locally and unverified. Never the token itself."""
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-    try:
-        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
-    except (ValueError, UnicodeDecodeError):
-        return None
-    return claims if isinstance(claims, dict) else None
-
-
-def _grants_write(scope: Any, namespace: str) -> bool:
-    """True when a scope entry grants write on ``namespace``, exactly as Musubi decides.
-
-    Mirrors musubi/auth/scopes.py (_parse_namespace_scope, _namespace_matches,
-    _namespace_scope_allows): "pattern:access" split on the last colon, access
-    r, w or rw; a bare ``**`` matches everything but never grants write; any
-    other pattern needs the same number of segments, each ``*`` or literal.
-    A looser matcher would call a ``**:rw`` token fine and then 403 (Aoi's review).
-    """
-    entries = scope.split() if isinstance(scope, str) else scope if isinstance(scope, list) else []
-    wanted = namespace.split("/")
-    for entry in entries:
-        if not isinstance(entry, str) or ":" not in entry:
-            continue
-        pattern, access = entry.rsplit(":", 1)
-        if access not in ("w", "rw") or pattern == "**":
-            continue
-        parts = pattern.split("/")
-        if len(parts) == len(wanted) and all(p == "*" or p == n for p, n in zip(parts, wanted, strict=True)):
-            return True
-    return False
-
-
-def _identity_refusal(claims: dict[str, Any]) -> str | None:
-    """Why Musubi would refuse these claims as an identity, or None.
-
-    Mirrors the identity half of musubi/auth/tokens.py _context_from_payload and
-    _identity_consistency_error / _concrete_scope_tenant, returning the server's
-    own fixed reasons, never a claim value. A token can fit sub and write scope
-    and still be refused on every request (Tama's review of harness 1.3.0).
-    Same logic as musubi_harness.tokens.identity_refusal (1.3.1); inline until
-    the plugin pins that release.
-    """
-    subject, presence, scopes = claims.get("sub"), claims.get("presence"), claims.get("scope")
-    if not isinstance(subject, str) or not subject:
-        return "token missing sub claim"
-    if not isinstance(presence, str) or not presence:
-        return "token missing presence claim"
-    if not (isinstance(scopes, str) or (isinstance(scopes, list) and all(isinstance(item, str) for item in scopes))):
-        return "token scope claim must be a string list"
-    parts = presence.split("/")
-    if len(parts) != 2 or any(not part for part in parts) or any("*" in part for part in parts):
-        return "token presence claim must be a concrete tenant/presence identity"
-    if subject != presence:
-        return "token subject is inconsistent with presence identity"
-    for scope in scopes.split() if isinstance(scopes, str) else scopes:
-        if scope == "operator" or ":" not in scope:
-            continue
-        tenant = scope.rsplit(":", 1)[0].split("/", 1)[0]
-        if tenant not in ("*", "**") and tenant and tenant != parts[0]:
-            return "token presence tenant is inconsistent with namespace scope tenant"
-    return None
-
-
-_PRESENCE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,63}")
-
-
-def _shown(value: Any) -> str:
-    """An unverified claim as it may appear in a message: presence-shaped, or a label.
-
-    A token's sub is untrusted input; a newline or control characters in it must
-    not forge a second line in the systemMessage (Yua's review of harness #12).
-    """
-    return value if isinstance(value, str) and _PRESENCE.fullmatch(value) else "an unrecognised subject"
-
-
 def token_warning() -> str | None:
-    """Say so when the Musubi token belongs to another presence, cannot write this one, or would be refused.
+    """Say so when the Musubi token belongs to another presence, cannot write this one, would be refused, or expires soon.
 
     Aoi's 0.5.0 canary: the plugin token was another seat's (sub aoi/voice, read-only
     on aoi/command-chair). Reads worked; every delivery 403'd at the drain, silently.
     The claims decode locally, so the mismatch can be named on the first turn.
     """
     token = os.environ.get("MUSUBI_TOKEN", "").strip()
-    if not token:
+    if not token or token_presence_problems is None:
         return None
     try:
         presence = runtime.runtime_config().presence
     except Exception:  # noqa: BLE001 - identity problems are reported elsewhere
         return None
-    claims = _claims(token)
-    if claims is None:
-        return None
-    sub = claims.get("sub")
-    problems = []
-    # A missing or non-string sub establishes no seat either (Yua's review of harness #12).
-    if sub != presence:
-        problems.append(f"the Musubi token is for {_shown(sub)}, but this seat is {_shown(presence)}")
-    if not _grants_write(claims.get("scope"), f"{presence}/episodic"):
-        problems.append(f"the token cannot write {_shown(presence)}/episodic, so nothing will be delivered")
-    refusal = _identity_refusal(claims)
-    if refusal:
-        problems.append(f"Musubi will refuse this token ({refusal})")
+    # The checks live in the shared harness (1.4.0): subject, write scope, and
+    # everything Musubi's own claim path refuses, each mirrored against the
+    # server in the harness's parity tests. Claims are decoded locally,
+    # unverified, and never printed as-is.
+    problems = token_presence_problems(token, presence)
     if not problems:
         return None
     # Say where THIS seat's token comes from: since #30 a seat whose launcher sets
