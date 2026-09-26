@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.0](https://github.com/sourceblender/musubi-claude/compare/v0.5.0...v0.6.0) (2026-09-26)
 
 
+### Upgrading
+
+* **No forced setup.** Setup now installs musubi-harness 1.2.0 (batched delivery), but an install already on 1.1.1 keeps running with no prompt and picks up batching the next time setup runs ([#27](https://github.com/sourceblender/musubi-claude/issues/27)).
+* **Several seats on one Mac.** Plugin settings and the token are stored once per macOS user, whatever the install scope. A seat whose launcher sets `MUSUBI_ACTOR`, `MUSUBI_PRESENCE` and `MUSUBI_ZONE` now owns its identity and transport: the per-user settings are ignored for that session, and it uses `MUSUBI_API_URL` + `MUSUBI_TOKEN` from its own environment ([#30](https://github.com/sourceblender/musubi-claude/issues/30)). Single-user installs without those variables behave exactly as before.
+* **A wrong token now says so.** Session start names a token that belongs to another seat or cannot write this one ([#29](https://github.com/sourceblender/musubi-claude/issues/29), [#31](https://github.com/sourceblender/musubi-claude/issues/31)), and a delivery pass that makes no progress is recorded as `delivery_stalled` instead of passing silently ([#28](https://github.com/sourceblender/musubi-claude/issues/28)).
+
 ### Features
 
 * a seat whose launcher sets its identity owns identity, transport and binaries ([#30](https://github.com/sourceblender/musubi-claude/issues/30)) ([241130e](https://github.com/sourceblender/musubi-claude/commit/241130efdfcb45129f91aff604dd9775dab83057))
