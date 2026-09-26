@@ -14,7 +14,12 @@ import subprocess  # re-exported for adapter tests and fault injection
 
 from musubi_claude_runtime import runtime, settings_source
 from musubi_harness.plugin_continuity import MAX_CONTENT, MAX_ROWS, PluginContinuity
-from musubi_harness.tokens import token_presence_problems
+
+try:
+    from musubi_harness.tokens import token_presence_problems
+except ImportError:  # harness < 1.4.0: the minimum stays 1.1.1, so this diagnostic
+    # waits for the next setup run instead of forcing one (Aoi's review, as in #27).
+    token_presence_problems = None
 
 
 _continuity = PluginContinuity(runtime)
@@ -31,7 +36,7 @@ def token_warning() -> str | None:
     The claims decode locally, so the mismatch can be named on the first turn.
     """
     token = os.environ.get("MUSUBI_TOKEN", "").strip()
-    if not token:
+    if not token or token_presence_problems is None:
         return None
     try:
         presence = runtime.runtime_config().presence
