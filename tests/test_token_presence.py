@@ -12,21 +12,26 @@ import base64
 import io
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+from musubi_harness.tokens import token_presence_problems
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "musubi-claude-session-start"
 BLOCK = "## Musubi continuity\n(stub)"
 
 
+REAL = {"iss": "https://oauth.example", "aud": "musubi"}  # every real Musubi token carries both
+
+
 def jwt(claims: dict[str, Any]) -> str:
     def part(obj: dict[str, Any]) -> str:
         return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
 
-    return f"{part({'alg': 'none'})}.{part(claims)}.sig"
+    return f"{part({'alg': 'none'})}.{part({**REAL, **claims})}.sig"
 
 
 def load(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, token: str | None) -> Any:
@@ -76,29 +81,6 @@ def test_another_seats_token_is_named_on_the_first_turn(monkeypatch: pytest.Monk
     assert "cannot write aoi/command-chair/episodic" in message
     assert output["hookSpecificOutput"] == {"hookEventName": "SessionStart", "additionalContext": BLOCK}
     assert VOICE not in json.dumps(output) and "sig" not in message  # never the token
-
-
-# Fixtures follow musubi/auth/scopes.py exactly, not glob intuition.
-@pytest.mark.parametrize(
-    ("scope", "writable"),
-    [
-        ("aoi/command-chair/*:rw", True),
-        ("aoi/command-chair/episodic:w", True),
-        ("aoi/*/episodic:rw", True),
-        (["aoi/command-chair/*:rw"], True),
-        ("**:rw", False),  # a bare ** never grants write
-        ("**:r", False),
-        ("aoi/command-chair/**:w", False),  # ** is only special on its own
-        ("aoi/**:rw", False),  # segment counts differ
-        ("aoi/*:rw", False),  # one segment does not reach aoi/command-chair/episodic
-        ("aoi/command-chair:rw", False),  # the presence itself, not its episodic plane
-        ("aoi/command-chair/*:rwx", False),  # access must be exactly r, w or rw
-        ("aoi/command-chair/*:r", False),
-    ],
-)
-def test_write_scope_matching(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scope: Any, writable: bool) -> None:
-    module = load(monkeypatch, tmp_path, None)
-    assert module._grants_write(scope, "aoi/command-chair/episodic") is writable
 
 
 @pytest.mark.parametrize("token", [None, "not-a-jwt", "a.b.c"], ids=["absent", "opaque", "undecodable"])
@@ -159,3 +141,19 @@ def test_a_presence_claim_that_disagrees_with_the_subject_is_named(monkeypatch: 
 def test_every_identity_refusal_is_named(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, claims: dict[str, Any], reason: str) -> None:
     module = load(monkeypatch, tmp_path, jwt(claims))
     assert f"Musubi will refuse this token ({reason})" in (module.token_warning() or "")
+
+
+def test_a_token_expiring_soon_is_named(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Harness 1.4.0: every seat's token was minted together, so they expire together.
+    soon = int(time.time()) + 86400
+    token = jwt({"sub": "aoi/command-chair", "presence": "aoi/command-chair", "scope": "aoi/command-chair/*:rw", "exp": soon})
+    warning = load(monkeypatch, tmp_path, token).token_warning() or ""
+    assert "expires on" in warning and "renew it before then" in warning
+
+
+def test_the_check_is_the_shared_harness_helper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # No second copy to drift: SessionStart reports exactly what the harness finds.
+    module = load(monkeypatch, tmp_path, VOICE)
+    assert module.token_presence_problems is token_presence_problems
+    expected = "Musubi memory: " + "; ".join(token_presence_problems(VOICE, "aoi/command-chair")) + ". "
+    assert (module.token_warning() or "").startswith(expected)
