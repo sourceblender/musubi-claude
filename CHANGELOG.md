@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0](https://github.com/sourceblender/musubi-claude/compare/v0.4.0...v0.5.0) (2026-09-26)
 
 
+### Upgrading
+
+* This release requires musubi-harness 1.1.1. An existing install reports "Musubi memory needs a one-time update" and captures and recalls nothing until you run `/musubi-claude:setup` once ([#19](https://github.com/sourceblender/musubi-claude/issues/19)).
+* Prompt recall is on by default in `verified` mode (`prompt_recall: auto`): your prompt is sent to Musubi as a search query. Set it to `off` to keep the previous behaviour ([#17](https://github.com/sourceblender/musubi-claude/issues/17)).
+
 ### Features
 
 * /musubi-claude:setup and /musubi-claude:health ([#8](https://github.com/sourceblender/musubi-claude/issues/8)) ([1be3b00](https://github.com/sourceblender/musubi-claude/commit/1be3b0027087799e04374ec36c0d866168d5e688))
@@ -35,8 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * plugin and marketplace descriptions name what it does today ([#21](https://github.com/sourceblender/musubi-claude/issues/21)) ([7839711](https://github.com/sourceblender/musubi-claude/commit/7839711e59241d6c6edd372e8704520aeb409915))
 * README for what the plugin is today ([#13](https://github.com/sourceblender/musubi-claude/issues/13)) ([f45a48a](https://github.com/sourceblender/musubi-claude/commit/f45a48a0a5a5a96240afaf74a65f90184a8484a1))
 * **skills:** shadow-mode remembers stay pending (not sent, not lost) ([#10](https://github.com/sourceblender/musubi-claude/issues/10)) ([d8c72c3](https://github.com/sourceblender/musubi-claude/commit/d8c72c3ffe798538d0011d477c8a2484e48a4ee5))
-
-## [Unreleased]
 
 ## [0.4.0] - 2026-09-26
 
@@ -76,5 +79,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   continues to work as the development head during the transition
   window. Any new fix lands here first, then backports.
 
-[Unreleased]: https://github.com/sourceblender/musubi-claude/compare/HEAD
 [0.4.0]: https://github.com/sourceblender/musubi-claude/releases/tag/v0.4.0
