@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "musubi-claude"
-version = "0.7.0"
+version = "0.7.1"
 description = "First-class Claude Code adapter for Musubi memory — Claude Code host binding for the musubi-harness runtime."
 readme = "README.md"
 requires-python = ">=3.12"
