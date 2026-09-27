@@ -165,7 +165,9 @@ second line. Monitors run in interactive sessions only.
 
 **Disclosure: a bearer token at rest.** Monitor processes receive no plugin
 settings, so the SessionStart hook writes the URL, token, your presence and the
-watched namespaces to `<plugin data>/monitor/stream.json` (a 0700 directory,
+watched namespaces to `<plugin data>/monitor/stream.json`, or, for a seat whose
+launcher sets `MUSUBI_ACTOR`, to its own `stream.<actor>__<seat>.json` built from
+that seat's environment, never from the shared settings (a 0700 directory,
 file created 0600, the same boundary as the local outbox). SessionEnd deletes
 it, but a crash can leave it behind until the next session rewrites it. It is
 written only in `verified` mode with sources set, and removed otherwise.

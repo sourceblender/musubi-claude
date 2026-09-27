@@ -26,6 +26,15 @@ generated text (never a URL, response body or exception text). It prints at
 most one "unavailable" line per outage, and keeps ``Last-Event-ID`` across
 reconnects so nothing is repeated or skipped.
 
+Identity follows the same rule as every other hook (see
+``musubi_claude_runtime.apply_seat_environment``): a seat whose launcher sets
+``MUSUBI_ACTOR`` owns its identity AND transport, and the per-user plugin
+options are ignored for it. Those options are shared by every seat under one OS
+user, so reading them here would stream as whoever last set /config, with their
+token. A seat's connection file is its own (``stream.<actor>__<seat>.json``
+beside ``--config``), so one seat's SessionStart can't point another seat's
+monitor at a different identity, and its SessionEnd removes only its own.
+
 Musubi stores each thought in its sender's namespace (``<presence>/thought``)
 and the stream matches a namespace exactly, so the monitor opens one stream per
 watched sender (the ``thought_sources`` setting); the server filters each to
@@ -251,6 +260,49 @@ def run_one(config: dict[str, Any], namespace: str, *, max_cycles: int | None = 
     return 0
 
 
+def _seat_owned(env: dict[str, str]) -> bool:
+    return bool(env.get("MUSUBI_ACTOR", "").strip())
+
+
+def config_path(folder: Path, env: dict[str, str]) -> Path | None:
+    """This process's connection file in ``folder``, or None for a seat whose presence is unusable.
+
+    Without a seat launcher there is one file, as before. A seat gets its own, named
+    by its presence, and never reads or removes the shared one.
+    """
+    if not _seat_owned(env):
+        return folder / "stream.json"
+    actor = env.get("MUSUBI_ACTOR", "").strip()
+    presence = env.get("MUSUBI_PRESENCE", "").strip()
+    if not _PRESENCE.fullmatch(presence) or presence.split("/", 1)[0] != actor:
+        return None
+    return folder / f"stream.{presence.replace('/', '__')}.json"
+
+
+def _identity(env: dict[str, str]) -> tuple[str, str, str, str]:
+    """(url, token, presence, delivery mode), resolved the way every other hook resolves it.
+
+    A seat launcher that sets MUSUBI_ACTOR owns identity AND transport: the
+    per-user options are never consulted for it, not even as a fallback, so a
+    seat without its own token streams nothing rather than someone else's.
+    """
+    if _seat_owned(env):
+        return (
+            env.get("MUSUBI_API_URL", "").strip(),
+            env.get("MUSUBI_TOKEN", "").strip(),
+            env.get("MUSUBI_PRESENCE", "").strip(),
+            env.get("MUSUBI_DELIVERY_MODE", "").strip(),
+        )
+    actor = env.get(_OPTION + "ACTOR", "").strip()
+    seat = env.get(_OPTION + "SEAT", "").strip()
+    return (
+        env.get(_OPTION + "MUSUBI_URL", "").strip(),
+        env.get(_OPTION + "MUSUBI_TOKEN", "").strip(),
+        f"{actor}/{seat}" if actor and seat else "",
+        env.get(_OPTION + "DELIVERY_MODE", "").strip(),
+    )
+
+
 def write_config(env: dict[str, str] | None = None) -> str:
     """SessionStart: write (or remove) the monitor's connection file. Returns a status word."""
     env = dict(os.environ) if env is None else env
@@ -258,16 +310,13 @@ def write_config(env: dict[str, str] | None = None) -> str:
     if not data:
         return "no_data_dir"
     folder = Path(data).expanduser() / "monitor"
-    target = folder / "stream.json"
-    url = env.get(_OPTION + "MUSUBI_URL", "").strip()
-    token = env.get(_OPTION + "MUSUBI_TOKEN", "").strip()
-    actor = env.get(_OPTION + "ACTOR", "").strip()
-    seat = env.get(_OPTION + "SEAT", "").strip()
-    mode = env.get(_OPTION + "DELIVERY_MODE", "").strip()
-    if not (url and token and actor and seat) or mode != "verified":
+    target = config_path(folder, env)
+    if target is None:
+        return "disabled"
+    url, token, presence, mode = _identity(env)
+    if not (url and token and presence) or mode != "verified":
         target.unlink(missing_ok=True)
         return "disabled"
-    presence = f"{actor}/{seat}"
     # Musubi stores a thought in its SENDER's namespace (<presence>/thought) and the
     # stream matches that namespace exactly, so we watch each source's namespace.
     sources = [p.strip() for p in env.get(_OPTION + "THOUGHT_SOURCES", "").split(",") if p.strip()]
@@ -293,11 +342,13 @@ def write_config(env: dict[str, str] | None = None) -> str:
 
 
 def remove_config(env: dict[str, str] | None = None) -> None:
-    """SessionEnd: remove the connection file (a running monitor already holds its copy)."""
+    """SessionEnd: remove this process's connection file (a running monitor already holds its copy)."""
     env = dict(os.environ) if env is None else env
     data = env.get("CLAUDE_PLUGIN_DATA", "").strip()
     if data:
-        (Path(data).expanduser() / "monitor" / "stream.json").unlink(missing_ok=True)
+        target = config_path(Path(data).expanduser() / "monitor", env)
+        if target is not None:
+            target.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -315,7 +366,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not args.config:
             return 0
-        config = wait_for_config(Path(args.config))
+        path = config_path(Path(args.config).parent, dict(os.environ))
+        if path is None:
+            return 0
+        config = wait_for_config(path)
         if config is None:
             return 0  # shadow mode or no token: nothing to stream, stay silent
         return run(config)

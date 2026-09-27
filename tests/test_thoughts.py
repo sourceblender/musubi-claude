@@ -265,3 +265,88 @@ def test_each_watched_sender_gets_its_own_stream(server: dict[str, str], capsys:
         "/v1/thoughts/stream?namespace=tama%2Fdesk%2Fthought",
         "/v1/thoughts/stream?namespace=yua%2Flaptop%2Fthought",
     ]
+
+
+# A seat launcher (cc-start) sets MUSUBI_ACTOR and owns identity AND transport. The
+# per-user options below belong to whoever last saved /config (here "alice"); a seat
+# must never stream as her, with her token, or share her connection file.
+SEAT = {
+    "MUSUBI_ACTOR": "bob",
+    "MUSUBI_PRESENCE": "bob/chair",
+    "MUSUBI_API_URL": "https://bob.example",
+    "MUSUBI_TOKEN": "tok-bob",
+    "MUSUBI_DELIVERY_MODE": "verified",
+}
+
+
+def test_a_seat_streams_as_itself_not_as_the_shared_options(tmp_path: Path) -> None:
+    env = {**OPTIONS, **SEAT, "CLAUDE_PLUGIN_DATA": str(tmp_path)}
+    assert thoughts.write_config(env) == "written"
+    folder = tmp_path / "monitor"
+    assert [p.name for p in folder.iterdir()] == ["stream.bob__chair.json"]
+    assert json.loads((folder / "stream.bob__chair.json").read_text()) == {
+        "url": "https://bob.example",
+        "token": "tok-bob",
+        "namespaces": ["yua/laptop/thought", "tama/desk/thought", "alice/laptop/thought"],
+        "presence": "bob/chair",
+    }
+
+
+@pytest.mark.parametrize("missing", ["MUSUBI_TOKEN", "MUSUBI_API_URL", "MUSUBI_DELIVERY_MODE"])
+def test_a_seat_without_its_own_transport_never_falls_back_to_the_shared_token(tmp_path: Path, missing: str) -> None:
+    env = {**OPTIONS, **SEAT, "CLAUDE_PLUGIN_DATA": str(tmp_path)}
+    env.pop(missing)
+    assert thoughts.write_config(env) == "disabled"
+    assert not (tmp_path / "monitor").exists() or not any((tmp_path / "monitor").iterdir())
+
+
+@pytest.mark.parametrize("presence", ["", "alice/laptop", "bob", "bob/../x", "Bob/chair"])
+def test_a_seat_whose_presence_is_not_its_own_writes_nothing(tmp_path: Path, presence: str) -> None:
+    env = {**OPTIONS, **SEAT, "MUSUBI_PRESENCE": presence, "CLAUDE_PLUGIN_DATA": str(tmp_path)}
+    assert thoughts.write_config(env) == "disabled"
+    assert not (tmp_path / "monitor").exists()
+
+
+def test_two_seats_keep_separate_files_and_each_monitor_reads_only_its_own(tmp_path: Path) -> None:
+    shared = {**OPTIONS, "CLAUDE_PLUGIN_DATA": str(tmp_path)}
+    carol = {
+        "MUSUBI_ACTOR": "carol",
+        "MUSUBI_PRESENCE": "carol/desk",
+        "MUSUBI_API_URL": "https://c.example",
+        "MUSUBI_TOKEN": "tok-carol",
+        "MUSUBI_DELIVERY_MODE": "verified",
+    }
+    assert thoughts.write_config(shared) == "written"  # a non-seat session: alice's file
+    assert thoughts.write_config({**shared, **SEAT}) == "written"
+    assert thoughts.write_config({**shared, **carol}) == "written"
+    folder = tmp_path / "monitor"
+    for env, token in ((shared, "tok-abc"), (SEAT, "tok-bob"), (carol, "tok-carol")):
+        path = thoughts.config_path(folder, env)
+        assert path is not None
+        config = thoughts.wait_for_config(path, wait=0)
+        assert config is not None and config["token"] == token
+    # SessionEnd of one seat leaves the other seat and the shared file alone
+    thoughts.remove_config({**shared, **SEAT})
+    assert sorted(p.name for p in folder.iterdir()) == ["stream.carol__desk.json", "stream.json"]
+
+
+def test_a_seat_monitor_ignores_a_fresh_shared_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = tmp_path / "monitor"
+    thoughts.write_config({**OPTIONS, "CLAUDE_PLUGIN_DATA": str(tmp_path)})
+    assert (folder / "stream.json").exists()
+    for key, value in SEAT.items():
+        monkeypatch.setenv(key, value)
+    seen: list[Path] = []
+    monkeypatch.setattr(thoughts, "wait_for_config", lambda path, **_kw: seen.append(path))
+    assert thoughts.main(["--config", str(folder / "stream.json")]) == 0
+    assert seen == [folder / "stream.bob__chair.json"]
+
+
+def test_a_seat_monitor_with_an_unusable_presence_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    thoughts.write_config({**OPTIONS, "CLAUDE_PLUGIN_DATA": str(tmp_path)})
+    for key, value in {**SEAT, "MUSUBI_PRESENCE": "alice/laptop"}.items():
+        monkeypatch.setenv(key, value)
+    seen: list[Path] = []
+    monkeypatch.setattr(thoughts, "wait_for_config", lambda path, **_kw: seen.append(path))
+    assert thoughts.main(["--config", str(tmp_path / "monitor" / "stream.json")]) == 0
+    assert seen == []
