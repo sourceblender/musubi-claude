@@ -5,6 +5,23 @@ All notable changes to `musubi-claude` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/sourceblender/musubi-claude/compare/v0.6.0...v0.7.0) (2026-09-26)
+
+
+### Upgrading
+
+* **No forced setup.** Setup now installs musubi-harness 1.4.0, but the minimum stays 1.1.1: an install on an older harness keeps running unchanged and simply shows no token warning until the next setup run ([#34](https://github.com/sourceblender/musubi-claude/issues/34)).
+* **Session start can now name a token Musubi would refuse**, including an expired one or one expiring within 14 days, and says where this seat's token comes from (the launcher, for seats that set their own identity) ([#32](https://github.com/sourceblender/musubi-claude/issues/32), [#34](https://github.com/sourceblender/musubi-claude/issues/34)).
+
+### Features
+
+* SessionStart uses harness 1.4.0's token checks, including expiry ([#34](https://github.com/sourceblender/musubi-claude/issues/34)) ([5989626](https://github.com/sourceblender/musubi-claude/commit/59896261b35fc60ba2a74eb6d205ca9d94e7265c))
+
+
+### Bug Fixes
+
+* SessionStart names a token Musubi would refuse, not only a wrong sub or scope ([#32](https://github.com/sourceblender/musubi-claude/issues/32)) ([345014a](https://github.com/sourceblender/musubi-claude/commit/345014aa906eaa63bb6b7bb604bfcb51fa6f334c))
+
 ## [0.6.0](https://github.com/sourceblender/musubi-claude/compare/v0.5.0...v0.6.0) (2026-09-26)
 
 
