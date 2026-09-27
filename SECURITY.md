@@ -2,53 +2,37 @@
 
 ## Supported versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.x.y   | :white_check_mark: |
-| < 1.0   | :x:                |
-
-The `1.x` line of `musubi-harness` is the supported stable line. Older
-versions are not maintained and will not receive security fixes.
+Security fixes target the latest released version of `musubi-claude`. This
+plugin is still pre-1.0; older release lines are not maintained. Please check
+whether the issue reproduces on the latest release or `main` when you can do
+so without putting real memory or credentials at risk.
 
 ## Reporting a vulnerability
 
-Please **do not** open a public GitHub issue for security vulnerabilities.
+Please do not open a public issue for a security vulnerability. Report it
+privately by emailing `ericmey@gmail.com`. Include:
 
-Email `ericmey@gmail.com` with:
+- The affected version or commit and the host environment.
+- What can go wrong, and the shortest safe steps to reproduce it.
+- Whether credentials, agent identity, conversation text, or stored memory
+  could cross a boundary.
+- Your intended disclosure timeline, if you have one.
 
-- A clear description of the vulnerability and its impact.
-- A reproducer — input, environment, observed behavior.
-- Whether you intend to disclose, and on what timeline.
-
-You will receive an acknowledgement within 3 business days. We aim to
-produce a fix or a mitigation plan within 14 days for high-impact
-issues.
-
-## What we will not do
-
-- We will not request, accept, or store bearer tokens, presence ids,
-  zone ids, or any other identity material in this repository or in
-  issue trackers. If your reproducer includes real credentials, redact
-  them before sending.
-- We will not publish a security advisory that includes
-  conversation text, transcripts, or any captured memory payload.
-  The harness is intentionally built to keep captured content out of
-  diagnostic sinks, and security work here should not undo that.
+Do not send live tokens, transcripts, or memory payloads. Redact them and use
+synthetic examples. We aim to acknowledge reports within three business days
+and to provide a fix or mitigation plan within 14 days for high-impact issues.
+We will coordinate disclosure with you.
 
 ## Scope
 
-In scope for security reports:
+This policy covers the `musubi-claude` Claude Code plugin: its hooks, MCP
+integration, setup flow, local configuration and state, recall, capture, and
+verified delivery. Identity and token scoping, prompt injection through
+recalled text, and accidental logging of sensitive content are in scope.
 
-- The `musubi_harness` Python package and its console scripts
-  (`musubi-harness`, `musubi-harness-conformance`).
-- The shipped configuration model (`$PLUGIN_DATA/config.json`,
-  `MUSUBI_*` environment variables) — these are the only knobs an
-  operator touches, and a misuse here is a real attack surface.
-
-Out of scope:
-
-- Host adapter implementations (`musubi-claude`, `musubi-codex`,
-  `musubi-livekit`, `musubi-hermes`, `musubi-openclaw`). Each adapter
-  has its own security policy and contact path.
-- The downstream Musubi core service. That has its own repository
-  and its own disclosure channel.
+The shared `musubi-harness` package is maintained in
+[sourceblender/musubi-harness](https://github.com/sourceblender/musubi-harness).
+The Musubi server and other host adapters have their own repositories.
+Use the affected repository's security policy when it has one. If it has no
+local policy, or the boundary is unclear, use the private contact above and
+we will route it.
