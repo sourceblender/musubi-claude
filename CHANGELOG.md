@@ -5,6 +5,13 @@ All notable changes to `musubi-claude` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1](https://github.com/sourceblender/musubi-claude/compare/v0.7.0...v0.7.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **thoughts:** a seat streams as itself, with its own connection file ([#35](https://github.com/sourceblender/musubi-claude/issues/35)) ([32dcc94](https://github.com/sourceblender/musubi-claude/commit/32dcc94a5bce0a3a626a9ade4dd79d783c5a1443))
+
 ## [0.7.0](https://github.com/sourceblender/musubi-claude/compare/v0.6.0...v0.7.0) (2026-09-26)
 
 
