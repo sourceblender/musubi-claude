@@ -39,7 +39,9 @@ TRIGGER_SCHEDULED = "scheduled"
 TRIGGER_SLASH = "slash-command"
 
 COMMAND_PREFIX = "<command-name>"
-# The prose half of a skill command; the <command-name> record carries the trigger.
+# Skill commands write ONE record whose tags come in the other order:
+# <command-message>…</command-message><command-name>…</command-name>. Measured
+# 13/13 on 2026-09-28; it is the command record itself, not context.
 COMMAND_MESSAGE_PREFIX = "<command-message>"
 STDOUT_PREFIX = "<local-command-stdout>"
 
@@ -128,12 +130,10 @@ def classify_user(record: dict[str, Any]) -> tuple[str, str | None]:
         return MACHINE, None
     if source is None:
         text = _text(record).lstrip()
-        if text.startswith(COMMAND_PREFIX):
+        if text.startswith(COMMAND_PREFIX) or text.startswith(COMMAND_MESSAGE_PREFIX):
             return MACHINE, TRIGGER_SLASH
         if text.startswith(STDOUT_PREFIX):
             return STDOUT, None
-        if text.startswith(COMMAND_MESSAGE_PREFIX):
-            return MACHINE, None
     return UNCLASSIFIED, None
 
 

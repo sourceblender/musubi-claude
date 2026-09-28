@@ -313,11 +313,17 @@ def test_non_terminal_input_channels_are_voice(source: str) -> None:
     assert [i.record_id for i in exchange_at(t, "m1").inputs] == [u]
 
 
-def test_skill_command_message_is_context_not_voice() -> None:
+def test_skill_command_record_with_message_first_is_the_trigger() -> None:
+    # Real shape: one record, <command-message> before <command-name> (13/13 measured).
     t = T()
-    cmd = t.user("<command-name>/morning</command-name>", "p1", source=None, origin=None)
-    t.user("<command-message>morning is running</command-message>", "p1", source=None, origin=None)
+    cmd = t.user(
+        "<command-message>morning is running</command-message>\n<command-name>/morning</command-name>",
+        "p1",
+        source=None,
+        origin=None,
+    )
+    t.user("Base directory for this skill: /x", "p1", source=None, origin=None, isMeta=True)
     t.assistant("m1", "report", "end_turn")
     e = exchange_at(t, "m1")
     assert e.inputs == ()
-    assert e.trigger is not None and e.trigger.record_id == cmd
+    assert e.trigger is not None and (e.trigger.trigger_class, e.trigger.record_id) == ("slash-command", cmd)
