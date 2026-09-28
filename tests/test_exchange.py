@@ -327,3 +327,11 @@ def test_skill_command_record_with_message_first_is_the_trigger() -> None:
     e = exchange_at(t, "m1")
     assert e.inputs == ()
     assert e.trigger is not None and (e.trigger.trigger_class, e.trigger.record_id) == ("slash-command", cmd)
+
+
+def test_message_only_command_record_is_context_not_a_trigger() -> None:
+    t = T()
+    t.user("<command-message>no command tag here</command-message>", "p1", source=None, origin=None)
+    t.assistant("m1", "a", "end_turn")
+    with pytest.raises(X.ExchangeError, match="no_eligible_input"):
+        exchange_at(t, "m1")

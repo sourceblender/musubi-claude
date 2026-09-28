@@ -130,8 +130,12 @@ def classify_user(record: dict[str, Any]) -> tuple[str, str | None]:
         return MACHINE, None
     if source is None:
         text = _text(record).lstrip()
-        if text.startswith(COMMAND_PREFIX) or text.startswith(COMMAND_MESSAGE_PREFIX):
+        if text.startswith(COMMAND_PREFIX):
             return MACHINE, TRIGGER_SLASH
+        if text.startswith(COMMAND_MESSAGE_PREFIX):
+            # The <command-name> tag is the host evidence of a command (Yua, gate on
+            # 68f5a62). A message-only record is context: never voice, never a trigger.
+            return (MACHINE, TRIGGER_SLASH) if COMMAND_PREFIX in text else (MACHINE, None)
         if text.startswith(STDOUT_PREFIX):
             return STDOUT, None
     return UNCLASSIFIED, None
