@@ -26,7 +26,11 @@ from dataclasses import dataclass
 from typing import Any
 
 TERMINAL_STOP_REASONS = frozenset({"end_turn", "stop_sequence", "refusal"})
-TTY_PROMPT_SOURCES = frozenset({"typed", "queued"})
+# Input channels, not speakers. typed/queued are the terminal; sdk is an SDK or IDE
+# (VS Code) caller; suggestion_accepted is a suggested prompt a person accepted. All four
+# were measured on real transcripts (2026-09-28); the last two were declining as
+# input_unclassified until the corpus run found 27 of them.
+TTY_PROMPT_SOURCES = frozenset({"typed", "queued", "sdk", "suggestion_accepted"})
 
 # Closed set. A class outside it is a bug in this module, not a new kind of input.
 TRIGGER_TASK = "task-notification"
@@ -35,6 +39,8 @@ TRIGGER_SCHEDULED = "scheduled"
 TRIGGER_SLASH = "slash-command"
 
 COMMAND_PREFIX = "<command-name>"
+# The prose half of a skill command; the <command-name> record carries the trigger.
+COMMAND_MESSAGE_PREFIX = "<command-message>"
 STDOUT_PREFIX = "<local-command-stdout>"
 
 # Bounds for walking parentUuid chains; a real chain is far shorter, and a cycle in
@@ -126,6 +132,8 @@ def classify_user(record: dict[str, Any]) -> tuple[str, str | None]:
             return MACHINE, TRIGGER_SLASH
         if text.startswith(STDOUT_PREFIX):
             return STDOUT, None
+        if text.startswith(COMMAND_MESSAGE_PREFIX):
+            return MACHINE, None
     return UNCLASSIFIED, None
 
 

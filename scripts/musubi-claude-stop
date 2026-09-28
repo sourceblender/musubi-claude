@@ -164,12 +164,13 @@ def candidate_from_hook(hook: dict[str, Any]) -> Candidate:
     """
     transcript = _hook_str(hook, "transcript_path", error="hook_transcript_missing")
     session = _hook_str(hook, "session_id", error="hook_session_missing")
-    prompt = _hook_str(hook, "prompt_id", "promptId",
-                       error="hook_prompt_id_missing",
-                       conflict="hook_prompt_id_conflict")
+    prompt = _hook_str(hook, "prompt_id", "promptId", error="hook_prompt_id_missing", conflict="hook_prompt_id_conflict")
     answer = _hook_str(
-        hook, "last_assistant_message", "lastAssistantMessage",
-        error="hook_answer_missing", conflict="hook_answer_conflict",
+        hook,
+        "last_assistant_message",
+        "lastAssistantMessage",
+        error="hook_answer_missing",
+        conflict="hook_answer_conflict",
     )
     return Candidate(
         session_id=session,
@@ -270,9 +271,7 @@ def stalled_reason(stdout: str) -> str | None:
     return None
 
 
-def delivery_commands(
-    envelope: dict[str, Any], configured: RuntimeConfig
-) -> list[tuple[list[str], int, bool]]:
+def delivery_commands(envelope: dict[str, Any], configured: RuntimeConfig) -> list[tuple[list[str], int, bool]]:
     """Shadow mode → no remote delivery. Verified mode → stage the just-enqueued event and
     run one bounded shared-drainer pass (up to several rows on harness >= 1.2.0). The drainer owns the durable receipt + exact
     readback; this adapter never POSTs Musubi directly and never treats a queued row as
@@ -353,16 +352,21 @@ def _record_degraded(reason: str, scope: dict[str, str] | None = None) -> None:
         pass
 
 
-# The answer lands a beat after Stop fires (musubi_claude_pending). Wait about a second
-# for it before deferring; the deferred path is the correctness guarantee, this only
-# keeps the common case from lagging one turn.
+# The answer lands a beat after Stop fires (musubi_claude_pending). The CURRENT Stop's
+# candidate gets about a second of polling so the common case does not lag a turn; the
+# pending file is the correctness guarantee, not the poll.
 POLL_ATTEMPTS = 5
 POLL_INTERVAL_SECONDS = 0.25
-# Older candidates drain inside their own bounded slice of the 30 s Stop budget:
-# enqueue (8 s) + stage (5 s) + drain (24 s) is already the old worst case.
+# Older candidates drain first, inside a bounded slice of the hook budget. The current
+# candidate is always attempted after them, whatever the slice used.
 DRAIN_BUDGET_SECONDS = 4.0
-DRAIN_MAX_CANDIDATES = 10
+DRAIN_MAX_OLDER = 5
+# Retryable: the answer is not on disk yet, the transcript is briefly unreadable, or
+# local infrastructure (identity config, enqueue, stage) failed. The candidate stays
+# pending until musubi_claude_pending's bounded expiry. Every other ExchangeError is a
+# fact about the transcript that retrying cannot change, and declines by name at once.
 NOT_YET = "answer_not_in_transcript"
+DEFINITIVE_ADAPTER_REASONS = frozenset({"hook_session_transcript_mismatch"})
 
 
 def _seat_root(configured: RuntimeConfig) -> Path:
@@ -389,21 +393,31 @@ def _enqueue(envelope: dict[str, Any], configured: RuntimeConfig) -> None:
         raise AdapterError(f"shadow_enqueue_failed:exit={result.returncode}")
 
 
-def _deliver(envelopes: list[dict[str, Any]], configured: RuntimeConfig, hook: Any) -> None:
-    """Verified mode: stage every captured event, then ONE bounded drainer pass.
-
-    Shadow default → no commands, nothing leaves the disk. Only the drain talks to
-    Musubi, so only the drain gets the credentials; stage is a local outbox transition.
-    """
-    if not envelopes:
+def _stage(envelope: dict[str, Any], configured: RuntimeConfig) -> None:
+    """Verified mode: promote the event to pending delivery. Local and idempotent
+    (a restage of the same event is inserted=False), so a crash between enqueue and
+    stage is repaired by simply running the candidate again."""
+    commands = delivery_commands(envelope, configured)
+    if not commands:
         return
-    commands = [delivery_commands(envelope, configured)[:1] for envelope in envelopes]
-    staged = [pair[0] for pair in commands if pair]
-    tail = delivery_commands(envelopes[-1], configured)[1:]
-    remote_env = tool_environment(configured)
-    local_env = local_tool_environment(configured)
-    for command, timeout, remote in [*staged, *tail]:
-        env = remote_env if remote else local_env
+    command, timeout, _remote = commands[0]
+    result = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+        env=local_tool_environment(configured),
+    )
+    if result.returncode != 0:
+        raise AdapterError(f"verified_delivery_failed:exit={result.returncode}")
+
+
+def _drain_remote(envelope: dict[str, Any], configured: RuntimeConfig, hook: Any) -> None:
+    """ONE bounded shared-drainer pass for everything staged. Only this talks to
+    Musubi, so only this gets the credentials."""
+    for command, timeout, remote in delivery_commands(envelope, configured)[1:]:
+        env = tool_environment(configured) if remote else local_tool_environment(configured)
         result = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False, env=env)
         fallback = without_batch_flags(command) if result.returncode == 2 else None
         if fallback is not None and "unrecognized arguments" in (result.stderr or ""):
@@ -420,67 +434,91 @@ def _deliver(envelopes: list[dict[str, Any]], configured: RuntimeConfig, hook: A
                 _record_degraded(f"delivery_stalled:{stalled}", _degraded_scope(hook))
 
 
-def capture_current(candidate: Candidate, configured: RuntimeConfig) -> dict[str, Any] | None:
-    """Capture this Stop's exchange now, or defer it. Returns the enqueued envelope."""
-    for attempt in range(POLL_ATTEMPTS):
-        try:
-            envelope = envelope_for(candidate)
-        except ExchangeError as exc:
-            if str(exc) != NOT_YET:
-                raise AdapterError(str(exc)) from exc
-            if attempt + 1 < POLL_ATTEMPTS:
-                time.sleep(POLL_INTERVAL_SECONDS)
-            continue
+RESOLVED, RETRY, DECLINED = "resolved", "retry", "declined"
+
+
+def _process(path: Path, candidate: Candidate, configured: RuntimeConfig, scope: dict[str, str]) -> tuple[str, dict[str, Any] | None]:
+    """One candidate, start to finish. The file is removed ONLY after enqueue AND
+    stage succeed, so any interruption leaves it to run again (both are idempotent)."""
+    try:
+        envelope = envelope_for(candidate)
+    except ExchangeError as exc:
+        if str(exc) == NOT_YET:
+            return RETRY, None
+        _record_degraded(str(exc), scope)
+        remove(path)
+        return DECLINED, None
+    except AdapterError as exc:
+        if str(exc) in DEFINITIVE_ADAPTER_REASONS:
+            _record_degraded(str(exc), scope)
+            remove(path)
+            return DECLINED, None
+        # transcript_unreadable, identity config: may clear on its own. Say so, keep it.
+        _record_degraded(f"pending_retry:{exc}", scope)
+        return RETRY, None
+    try:
         _enqueue(envelope, configured)
-        return envelope
-    save(_seat_root(configured), candidate)
-    return None
+        _stage(envelope, configured)
+    except (AdapterError, OSError, subprocess.SubprocessError) as exc:
+        reason = str(exc) if isinstance(exc, AdapterError) else "adapter_runtime_failed"
+        _record_degraded(f"pending_retry:{reason}", scope)
+        return RETRY, None
+    remove(path)
+    return RESOLVED, envelope
 
 
-def drain_pending(configured: RuntimeConfig, hook: Any, *, skip_key: str | None = None) -> list[dict[str, Any]]:
-    """Resolve deferred candidates whose answer is now on disk. Each is its own unit:
-    one bad candidate is declined visibly and never blocks the others."""
+def _retry(path: Path, candidate: Candidate, configured: RuntimeConfig, scope: dict[str, str]) -> None:
+    candidate.attempts += 1
+    if expired(candidate):
+        _record_degraded("pending_expired", scope)
+        remove(path)
+    else:
+        save(_seat_root(configured), candidate)
+
+
+def drain(configured: RuntimeConfig, hook: Any, *, current_key: str | None = None) -> list[dict[str, Any]]:
+    """Resolve pending candidates OLDEST FIRST, then the current Stop's (with its short
+    poll). Each candidate is its own unit: a failure is recorded by name and the loop
+    continues, so one bad candidate never blocks another or hides earlier successes."""
     captured: list[dict[str, Any]] = []
-    deadline = time.monotonic() + DRAIN_BUDGET_SECONDS
-    handled = 0
-    for path, candidate in load_all(_seat_root(configured)):
-        if handled >= DRAIN_MAX_CANDIDATES or time.monotonic() > deadline:
-            break
-        if candidate is not None and candidate.key == skip_key:
-            continue
-        handled += 1
+    entries = list(load_all(_seat_root(configured)))
+    readable = [(p, c) for p, c in entries if c is not None]
+    for path, candidate in entries:
         if candidate is None:
             _record_degraded("pending_unreadable", _degraded_scope(hook))
             remove(path)
-            continue
+    readable.sort(key=lambda item: item[1].created_at)
+    older = [(p, c) for p, c in readable if c.key != current_key]
+    current = [(p, c) for p, c in readable if c.key == current_key]
+    deadline = time.monotonic() + DRAIN_BUDGET_SECONDS
+    for index, (path, candidate) in enumerate(older):
+        if index >= DRAIN_MAX_OLDER or time.monotonic() > deadline:
+            break
         scope = {**_degraded_scope(hook), "session_id": candidate.session_id}
-        try:
-            envelope = envelope_for(candidate)
-        except ExchangeError as exc:
-            if str(exc) == NOT_YET:
-                candidate.attempts += 1
-                if expired(candidate):
-                    _record_degraded("pending_expired", scope)
-                    remove(path)
-                else:
-                    save(_seat_root(configured), candidate)
-                continue
-            _record_degraded(str(exc), scope)
-            remove(path)
-            continue
-        except AdapterError as exc:
-            _record_degraded(str(exc), scope)
-            remove(path)
-            continue
-        # Enqueue before removing: a failed enqueue keeps the candidate for next time.
-        _enqueue(envelope, configured)
-        remove(path)
-        captured.append(envelope)
+        outcome, envelope = _process(path, candidate, configured, scope)
+        if outcome == RESOLVED and envelope is not None:
+            captured.append(envelope)
+        elif outcome == RETRY:
+            _retry(path, candidate, configured, scope)
+    for path, candidate in current:
+        scope = {**_degraded_scope(hook), "session_id": candidate.session_id}
+        for attempt in range(POLL_ATTEMPTS):
+            outcome, envelope = _process(path, candidate, configured, scope)
+            if outcome != RETRY:
+                break
+            if attempt + 1 < POLL_ATTEMPTS:
+                time.sleep(POLL_INTERVAL_SECONDS)
+        if outcome == RESOLVED and envelope is not None:
+            captured.append(envelope)
+        elif outcome == RETRY:
+            _retry(path, candidate, configured, scope)
     return captured
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    # SessionStart / SessionEnd run with --drain-only: they resolve and stage locally
+    # but leave the network pass to the next Stop, which has the budget for it.
     drain_only = "--drain-only" in args
     hook: Any = None
     try:
@@ -494,20 +532,19 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(hook, dict):
             raise AdapterError("hook_payload_invalid")
         configured = runtime_config()
-        captured: list[dict[str, Any]] = []
-        skip_key = None
+        current_key = None
         if not drain_only:
             try:
                 candidate = candidate_from_hook(hook)
-                skip_key = candidate.key
-                envelope = capture_current(candidate, configured)
-                if envelope is not None:
-                    captured.append(envelope)
+                # Saved BEFORE any capture attempt: from here on, nothing that fails
+                # (enqueue, stage, a killed hook) can lose this exchange.
+                save(_seat_root(configured), candidate)
+                current_key = candidate.key
             except AdapterError as exc:
-                # This Stop declines; older candidates still get their chance below.
                 _record_degraded(str(exc), _degraded_scope(hook))
-        captured.extend(drain_pending(configured, hook, skip_key=skip_key))
-        _deliver(captured, configured, hook)
+        captured = drain(configured, hook, current_key=current_key)
+        if captured and not drain_only:
+            _drain_remote(captured[-1], configured, hook)
     except (AdapterError, json.JSONDecodeError, OSError, subprocess.SubprocessError, RuntimeConfigError) as exc:
         reason = str(exc) if isinstance(exc, (AdapterError, RuntimeConfigError)) else "adapter_runtime_failed"
         _record_degraded(reason, _degraded_scope(hook))

@@ -145,6 +145,9 @@ def captured(stop_module: Any, monkeypatch: pytest.MonkeyPatch) -> list[dict[str
     """Replace the harness enqueue with a recorder; no subprocess, no outbox."""
     sink: list[dict[str, Any]] = []
     monkeypatch.setattr(stop_module, "_enqueue", lambda envelope, configured: sink.append(envelope))
+    # Stage is exercised for real by the delivery tests; here it would run whatever
+    # harness binary is on PATH.
+    monkeypatch.setattr(stop_module, "_stage", lambda envelope, configured: None)
     monkeypatch.setattr(stop_module, "POLL_ATTEMPTS", 1)
     monkeypatch.setattr(stop_module, "POLL_INTERVAL_SECONDS", 0)
     return sink
@@ -193,15 +196,28 @@ def test_alias_conflict_refused(stop_module: Any, tx: Tx) -> None:
         stop_module.candidate_from_hook(hook_for(tx, promptId="p-OTHER"))
 
 
+def stop_run(stop_module: Any, monkeypatch: pytest.MonkeyPatch, hook: dict[str, Any] | str, *, drain_only: bool = False) -> None:
+    import io
+
+    raw = hook if isinstance(hook, str) else json.dumps(hook)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(raw))
+    assert stop_module.main(["--drain-only"] if drain_only else []) == 0
+
+
+def degraded_reasons(stop_module: Any) -> list[str]:
+    path = stop_module._data_root() / "degraded.jsonl"
+    return [json.loads(line)["reason"] for line in path.read_text().splitlines()] if path.exists() else []
+
+
 # ---------------------------------------------------------------------------
 # Envelope projection
 # ---------------------------------------------------------------------------
 
 
-def test_voice_envelope_shape(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+def test_voice_envelope_shape(stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
     first = tx.typed("hello")
     tx.answer("msg_A", "world")
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    stop_run(stop_module, monkeypatch, hook_for(tx))
     [envelope] = captured
     assert envelope["event_id"] == f"exchange.v1:claude-code:{SESSION}:msg_A"
     assert (envelope["user_text"], envelope["assistant_text"]) == ("hello", "world")
@@ -212,28 +228,35 @@ def test_voice_envelope_shape(stop_module: Any, tx: Tx, captured: list[dict[str,
     # Hook decoration does not reach metadata, so a replay with a different model
     # cannot collide.
     assert "model" not in envelope["metadata"]
+    assert pending_files(stop_module) == []
 
 
-def test_answer_text_is_the_events_verbatim(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+def test_answer_text_is_the_events_verbatim(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
     text = "  keep\n\n```\ncode\n```  "
     tx.typed("q")
     tx.answer("msg_A", text)
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx, answer=text)), stop_module.runtime_config())
+    stop_run(stop_module, monkeypatch, hook_for(tx, answer=text))
     assert captured[0]["assistant_text"] == text
 
 
-def test_transcript_disagreeing_with_event_text_is_refused(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+def test_transcript_disagreeing_with_event_text_declines(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
     tx.typed("q")
     tx.answer("msg_A", "what the transcript says")
-    with pytest.raises(stop_module.AdapterError, match="answer_text_mismatch"):
-        stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx, answer="what Stop says")), stop_module.runtime_config())
-    assert captured == []
+    stop_run(stop_module, monkeypatch, hook_for(tx, answer="what Stop says"))
+    assert captured == [] and pending_files(stop_module) == []
+    reasons = degraded_reasons(stop_module)
+    assert reasons == ["answer_text_mismatch"]
+    assert "what Stop says" not in (stop_module._data_root() / "degraded.jsonl").read_text()
 
 
-def test_trigger_envelope_shape(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+def test_trigger_envelope_shape(stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
     rid = tx.task("agent finished")
     tx.answer("msg_A", "world")
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    stop_run(stop_module, monkeypatch, hook_for(tx))
     [envelope] = captured
     assert envelope["user_text"] == ""
     assert (envelope["input_kind"], envelope["trigger_class"], envelope["trigger_record_id"], envelope["trigger_text"]) == (
@@ -244,80 +267,155 @@ def test_trigger_envelope_shape(stop_module: Any, tx: Tx, captured: list[dict[st
     )
 
 
-def test_transcript_session_mismatch_refused(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+def test_transcript_session_mismatch_declines(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
     tx.typed("q")
     tx.answer("msg_A", "world")
-    with pytest.raises(stop_module.AdapterError, match="hook_session_transcript_mismatch"):
-        stop_module.capture_current(
-            stop_module.candidate_from_hook({**hook_for(tx), "session_id": "s-OTHER"}),
-            stop_module.runtime_config(),
-        )
+    stop_run(stop_module, monkeypatch, {**hook_for(tx), "session_id": "s-OTHER"})
+    assert captured == [] and pending_files(stop_module) == []
+    assert degraded_reasons(stop_module) == ["hook_session_transcript_mismatch"]
 
 
 # ---------------------------------------------------------------------------
-# The write race: defer, then resolve
+# The write race: save first, resolve when the answer lands
 # ---------------------------------------------------------------------------
 
 
-def test_answer_not_yet_written_is_deferred_not_dropped(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+def test_answer_not_yet_written_is_deferred_not_dropped(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
     tx.typed("q")
-    result = stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
-    assert result is None and captured == []
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    assert captured == []
     [path] = pending_files(stop_module)
     assert (path.stat().st_mode & 0o777) == 0o600
-
-
-def test_deferred_candidate_resolves_once_the_answer_lands(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
-    tx.typed("q")
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
-    tx.answer("msg_A", "world")
-    drained = stop_module.drain_pending(stop_module.runtime_config(), {})
-    assert [e["event_id"] for e in drained] == [f"exchange.v1:claude-code:{SESSION}:msg_A"]
-    assert pending_files(stop_module) == []
-
-
-def test_still_missing_candidate_counts_an_attempt(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
-    tx.typed("q")
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
-    stop_module.drain_pending(stop_module.runtime_config(), {})
-    [path] = pending_files(stop_module)
     assert json.loads(path.read_text())["attempts"] == 1
+
+
+def test_deferred_candidate_resolves_on_drain_only(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tx.typed("q")
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    tx.answer("msg_A", "world")
+    stop_run(stop_module, monkeypatch, {"session_id": SESSION, "reason": "exit"}, drain_only=True)
+    assert [e["metadata"]["answer_id"] for e in captured] == ["msg_A"]
+    assert pending_files(stop_module) == []
 
 
 def test_expired_candidate_is_declined_visibly(
     stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("musubi_claude_pending.MAX_ATTEMPTS", 2)
     tx.typed("q")
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
-    monkeypatch.setattr("musubi_claude_pending.MAX_ATTEMPTS", 1)
-    stop_module.drain_pending(stop_module.runtime_config(), {})
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    stop_run(stop_module, monkeypatch, {}, drain_only=True)
     assert pending_files(stop_module) == []
-    degraded = (stop_module._data_root() / "degraded.jsonl").read_text()
-    assert '"reason": "pending_expired"' in degraded
+    assert degraded_reasons(stop_module) == ["pending_expired"]
 
 
-def test_definitive_decline_removes_candidate(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+def test_definitive_decline_removes_candidate(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
     tx.typed("q")
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    stop_run(stop_module, monkeypatch, hook_for(tx))
     tx.answer("msg_A", "not what Stop said")
-    assert stop_module.drain_pending(stop_module.runtime_config(), {}) == []
-    assert pending_files(stop_module) == []
-    degraded = (stop_module._data_root() / "degraded.jsonl").read_text()
-    assert "answer_text_mismatch" in degraded and "not what Stop said" not in degraded
+    stop_run(stop_module, monkeypatch, {}, drain_only=True)
+    assert captured == [] and pending_files(stop_module) == []
+    assert degraded_reasons(stop_module) == ["answer_text_mismatch"]
 
 
-def test_one_bad_candidate_does_not_block_another(stop_module: Any, tmp_path: Path, captured: list[dict[str, Any]]) -> None:
-    good = Tx(tmp_path / "good.jsonl")
-    bad = Tx(tmp_path / "bad.jsonl")
-    good.typed("q1", prompt="p-good")
-    bad.typed("q2", prompt="p-bad")
-    config = stop_module.runtime_config()
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(good, prompt="p-good")), config)
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(bad, prompt="p-bad")), config)
-    good.answer("msg_G", "world")
-    bad.answer("msg_B", "a different text")
-    drained = stop_module.drain_pending(config, {})
-    assert [e["metadata"]["answer_id"] for e in drained] == ["msg_G"]
+# Yua's gate on 9834dbf, one test per defect.
+
+
+def test_enqueue_failure_keeps_the_current_candidate(stop_module: Any, tx: Tx, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(1) The answer is on disk but enqueue fails: the exchange must survive."""
+    monkeypatch.setattr(stop_module, "POLL_ATTEMPTS", 1)
+
+    def broken(envelope: dict[str, Any], configured: Any) -> None:
+        raise stop_module.AdapterError("shadow_enqueue_failed:exit=1")
+
+    monkeypatch.setattr(stop_module, "_enqueue", broken)
+    tx.typed("q")
+    tx.answer("msg_A", "world")
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    assert len(pending_files(stop_module)) == 1
+    assert degraded_reasons(stop_module) == ["pending_retry:shadow_enqueue_failed:exit=1"]
+
+
+def test_one_enqueue_failure_does_not_block_later_candidates_or_hide_successes(
+    stop_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(2) A failing older candidate must not stop the ones after it, and the ones
+    that succeeded must still reach the remote drain."""
+    monkeypatch.setattr(stop_module, "POLL_ATTEMPTS", 1)
+    txs = {name: Tx(tmp_path / f"{name}.jsonl") for name in ("a", "b", "c")}
+    for name, t in txs.items():
+        t.typed(f"q-{name}", prompt=f"p-{name}")
+        stop_run(stop_module, monkeypatch, hook_for(t, answer=f"ans-{name}", prompt=f"p-{name}"))
+    for name, t in txs.items():
+        t.answer(f"msg_{name}", f"ans-{name}")
+    enqueued: list[str] = []
+
+    def flaky(envelope: dict[str, Any], configured: Any) -> None:
+        if envelope["metadata"]["answer_id"] == "msg_a":
+            raise stop_module.AdapterError("shadow_enqueue_failed:exit=1")
+        enqueued.append(envelope["metadata"]["answer_id"])
+
+    drained: list[str] = []
+    monkeypatch.setattr(stop_module, "_stage", lambda envelope, configured: None)
+    monkeypatch.setattr(stop_module, "_enqueue", flaky)
+    monkeypatch.setattr(stop_module, "_drain_remote", lambda env, cfg, hook: drained.append(env["metadata"]["answer_id"]))
+    stop_run(stop_module, monkeypatch, hook_for(txs["c"], answer="ans-c", prompt="p-c"))
+    assert enqueued == ["msg_b", "msg_c"]
+    assert drained == ["msg_c"]
+    assert len(pending_files(stop_module)) == 1  # msg_a waits for the next pass
+
+
+def test_unreadable_transcript_is_retried_not_deleted(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(3) A rotated or briefly missing transcript keeps its candidate until expiry."""
+    tx.typed("q")
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    tx.path.rename(tx.path.with_suffix(".moved"))
+    stop_run(stop_module, monkeypatch, {}, drain_only=True)
+    assert len(pending_files(stop_module)) == 1
+    assert "pending_retry:transcript_unreadable" in degraded_reasons(stop_module)
+    tx.path.with_suffix(".moved").rename(tx.path)
+    tx.answer("msg_A", "world")
+    stop_run(stop_module, monkeypatch, {}, drain_only=True)
+    assert [e["metadata"]["answer_id"] for e in captured] == ["msg_A"]
+
+
+def test_older_candidates_are_captured_before_the_current_one(
+    stop_module: Any, tmp_path: Path, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(4) Chronology: a deferred earlier exchange lands before the Stop that follows it."""
+    t = Tx(tmp_path / "t.jsonl")
+    t.typed("first", prompt="p-1")
+    stop_run(stop_module, monkeypatch, hook_for(t, answer="one", prompt="p-1"))
+    t.answer("msg_1", "one")
+    t.typed("second", prompt="p-2")
+    t.answer("msg_2", "two")
+    stop_run(stop_module, monkeypatch, hook_for(t, answer="two", prompt="p-2"))
+    assert [e["metadata"]["answer_id"] for e in captured] == ["msg_1", "msg_2"]
+
+
+def test_drain_only_never_talks_to_musubi(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(5) SessionStart/End have 15 s; the 24 s remote pass is the next Stop's job."""
+    calls: list[str] = []
+    monkeypatch.setattr(stop_module, "_drain_remote", lambda *a: calls.append("remote"))
+    tx.typed("q")
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    tx.answer("msg_A", "world")
+    stop_run(stop_module, monkeypatch, {}, drain_only=True)
+    assert len(captured) == 1 and calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -325,37 +423,9 @@ def test_one_bad_candidate_does_not_block_another(stop_module: Any, tmp_path: Pa
 # ---------------------------------------------------------------------------
 
 
-def test_main_defers_and_exits_zero(
-    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    import io
-
-    tx.typed("q")
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(hook_for(tx))))
-    assert stop_module.main([]) == 0
-    assert capsys.readouterr().out.strip() == "{}"
-    assert len(pending_files(stop_module)) == 1
-
-
-def test_main_drain_only_tolerates_session_end_payload(
-    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import io
-
-    tx.typed("q")
-    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
-    tx.answer("msg_A", "world")
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"session_id": SESSION, "reason": "exit"})))
-    assert stop_module.main(["--drain-only"]) == 0
-    assert [e["metadata"]["answer_id"] for e in captured] == ["msg_A"]
-
-
 def test_main_garbage_stdin_degrades(stop_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    import io
-
-    monkeypatch.setattr(sys, "stdin", io.StringIO("not json"))
-    assert stop_module.main([]) == 0
-    assert "adapter_runtime_failed" in (stop_module._data_root() / "degraded.jsonl").read_text()
+    stop_run(stop_module, monkeypatch, "not json")
+    assert degraded_reasons(stop_module) == ["adapter_runtime_failed"]
 
 
 # ---------------------------------------------------------------------------

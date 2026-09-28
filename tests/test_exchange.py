@@ -303,3 +303,21 @@ def test_exchange_id_satisfies_harness_event_re() -> None:
     event_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$")
     real = X.exchange_id("6fc02f76-0b0c-4f5e-9f1f-6b1e2c1d9a3b", "msg_01ABCdefGHIjklMNOpqrSTUv")
     assert event_re.fullmatch(real)
+
+
+@pytest.mark.parametrize("source", ["sdk", "suggestion_accepted"])
+def test_non_terminal_input_channels_are_voice(source: str) -> None:
+    t = T()
+    u = t.user("from an IDE or SDK caller", "p1", source=source)
+    t.assistant("m1", "a", "end_turn")
+    assert [i.record_id for i in exchange_at(t, "m1").inputs] == [u]
+
+
+def test_skill_command_message_is_context_not_voice() -> None:
+    t = T()
+    cmd = t.user("<command-name>/morning</command-name>", "p1", source=None, origin=None)
+    t.user("<command-message>morning is running</command-message>", "p1", source=None, origin=None)
+    t.assistant("m1", "report", "end_turn")
+    e = exchange_at(t, "m1")
+    assert e.inputs == ()
+    assert e.trigger is not None and e.trigger.record_id == cmd
