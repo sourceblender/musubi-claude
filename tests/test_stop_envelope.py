@@ -7,12 +7,11 @@ validates the envelope once it arrives; this adapter is responsible for
 
 The tests here are intentionally focused on the things that have caused
 production defects:
-- Event id is bound to the event's own identity (`claude-code:<session>:<prompt>`),
-  so retries dedupe.
-- The Stop event's `last_assistant_message` is authoritative — never
-  reconstructed from the transcript.
-- `prompt_id_ambiguous` is refused, not silently collapsed.
-- `isMeta` records fall back only when no non-meta sibling exists.
+- Event id is the EXCHANGE identity (`exchange.v1:claude-code:<session>:<answer message.id>`),
+  per musubi-harness docs/exchange-identity.md, so retries and replays dedupe.
+- The Stop event's `last_assistant_message` is authoritative for the answer TEXT; the
+  transcript supplies the anchor id and the input span, and must agree on the text.
+- An answer not yet written at Stop time is deferred, never dropped, and resolves later.
 - The hook degrades visibly and exits 0 on every failure.
 """
 
@@ -76,128 +75,122 @@ def stop_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     return _load_stop_module()
 
 
-def _write_transcript(tmp_path: Path, records: list[dict[str, Any]]) -> Path:
-    """Write records as a JSONL transcript and return the path."""
-    path = tmp_path / "transcript.jsonl"
-    path.write_text(
-        "\n".join(json.dumps(r) for r in records) + "\n",
-        encoding="utf-8",
-    )
-    return path
+SESSION = "s-abc"
 
 
-def _prompt_record(
-    *,
-    prompt_id: str = "p-123",
-    session_id: str = "s-abc",
-    text: str = "hello",
-    is_meta: bool = False,
-) -> dict[str, Any]:
-    return {
-        "type": "user",
-        "isMeta": is_meta,
-        "promptId": prompt_id,
-        "sessionId": session_id,
-        "message": {"role": "user", "content": text},
-    }
+class Tx:
+    """Claude transcript records in the shapes measured on real seats (2026-09-28)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.records: list[dict[str, Any]] = []
+        self._n = 0
+        self._last: str | None = None
+
+    def _add(self, record: dict[str, Any]) -> str:
+        self._n += 1
+        uid = f"u{self._n:03d}"
+        record.update({"uuid": uid, "parentUuid": self._last, "sessionId": record.get("sessionId", SESSION)})
+        self.records.append(record)
+        self._last = uid
+        self.flush()
+        return uid
+
+    def typed(self, text: str, prompt: str = "p-123", **extra: Any) -> str:
+        return self._add(
+            {
+                "type": "user",
+                "promptId": prompt,
+                "promptSource": "typed",
+                "origin": {"kind": "human"},
+                "message": {"role": "user", "content": text},
+                **extra,
+            }
+        )
+
+    def task(self, text: str, prompt: str = "p-123") -> str:
+        return self._add(
+            {
+                "type": "user",
+                "promptId": prompt,
+                "promptSource": "system",
+                "origin": {"kind": "task-notification"},
+                "message": {"role": "user", "content": text},
+            }
+        )
+
+    def answer(self, msg: str, text: str, stop: str = "end_turn") -> str:
+        return self._add(
+            {
+                "type": "assistant",
+                "message": {"id": msg, "role": "assistant", "stop_reason": stop, "content": [{"type": "text", "text": text}]},
+            }
+        )
+
+    def flush(self) -> None:
+        self.path.write_text("\n".join(json.dumps(r) for r in self.records) + "\n", encoding="utf-8")
 
 
 @pytest.fixture
-def transcript(tmp_path: Path) -> Path:
-    """A single-record transcript that pairs with the event defaults below."""
-    return _write_transcript(tmp_path, [_prompt_record()])
+def tx(tmp_path: Path) -> Tx:
+    return Tx(tmp_path / "transcript.jsonl")
+
+
+def hook_for(tx: Tx, answer: str = "world", prompt: str = "p-123", **extra: Any) -> dict[str, Any]:
+    return {"transcript_path": str(tx.path), "session_id": SESSION, "prompt_id": prompt, "last_assistant_message": answer, **extra}
 
 
 @pytest.fixture
-def event() -> dict[str, Any]:
-    """The Stop-event payload that pairs with the `transcript` fixture."""
-    return {
-        "transcript_path": "",  # filled in by the test
-        "session_id": "s-abc",
-        "prompt_id": "p-123",
-        "last_assistant_message": "world",
-    }
+def captured(stop_module: Any, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Replace the harness enqueue with a recorder; no subprocess, no outbox."""
+    sink: list[dict[str, Any]] = []
+    monkeypatch.setattr(stop_module, "_enqueue", lambda envelope, configured: sink.append(envelope))
+    monkeypatch.setattr(stop_module, "POLL_ATTEMPTS", 1)
+    monkeypatch.setattr(stop_module, "POLL_INTERVAL_SECONDS", 0)
+    return sink
+
+
+def pending_files(stop_module: Any) -> list[Path]:
+    root = stop_module._seat_root(stop_module.runtime_config()) / "pending"
+    return sorted(root.glob("*.json")) if root.is_dir() else []
 
 
 # ---------------------------------------------------------------------------
-# Event-id shape and aliasing
+# The Stop event's own facts
 # ---------------------------------------------------------------------------
 
 
-def test_event_id_shape(stop_module: Any, transcript: Path, event: dict[str, Any]) -> None:
-    """The event id is `claude-code:<session>:<prompt>` — stable across retries."""
-    event["transcript_path"] = str(transcript)
-    envelope = stop_module.build_envelope(event)
-    assert envelope["event_id"] == "claude-code:s-abc:p-123"
-
-
-def test_event_id_uses_camelcase_aliases(stop_module: Any, transcript: Path) -> None:
-    """Aliases (promptId, lastAssistantMessage) are accepted alongside snake_case."""
-    envelope = stop_module.build_envelope(
+def test_camelcase_aliases_accepted(stop_module: Any, tx: Tx) -> None:
+    candidate = stop_module.candidate_from_hook(
         {
-            "transcript_path": str(transcript),
-            "session_id": "s-abc",
+            "transcript_path": str(tx.path),
+            "session_id": SESSION,
             "promptId": "p-123",
             "lastAssistantMessage": "world",
         }
     )
-    assert envelope["event_id"] == "claude-code:s-abc:p-123"
+    assert (candidate.prompt_id, candidate.answer_text) == ("p-123", "world")
 
 
-def test_alias_conflict_refused(stop_module: Any) -> None:
-    """If snake_case and camelCase disagree on the prompt id, refuse closed.
-
-    Taking the first alias that happened to be present would let a
-    payload carrying both `prompt_id` and `promptId` with DIFFERENT
-    values decide event identity by key order — the object would be
-    stored under one id while the turn it describes belongs to another.
-    """
-    with pytest.raises(stop_module.AdapterError, match="prompt_id_conflict"):
-        stop_module.build_envelope(
-            {
-                "transcript_path": "/nonexistent",
-                "session_id": "s-abc",
-                "prompt_id": "p-123",
-                "promptId": "p-different",
-                "last_assistant_message": "world",
-            }
-        )
+@pytest.mark.parametrize(
+    ("drop", "reason"),
+    [
+        ("prompt_id", "hook_prompt_id_missing"),
+        ("session_id", "hook_session_missing"),
+        ("last_assistant_message", "hook_answer_missing"),
+        ("transcript_path", "hook_transcript_missing"),
+    ],
+)
+def test_missing_event_fact_refused(stop_module: Any, tx: Tx, drop: str, reason: str) -> None:
+    hook = hook_for(tx)
+    del hook[drop]
+    with pytest.raises(stop_module.AdapterError, match=reason):
+        stop_module.candidate_from_hook(hook)
 
 
-def test_missing_prompt_id_refused(stop_module: Any) -> None:
-    """Without a prompt_id, no envelope is constructed."""
-    with pytest.raises(stop_module.AdapterError, match="hook_prompt_id_missing"):
-        stop_module.build_envelope(
-            {
-                "transcript_path": "/nonexistent",
-                "session_id": "s-abc",
-                "last_assistant_message": "world",
-            }
-        )
-
-
-def test_missing_session_id_refused(stop_module: Any) -> None:
-    """Without a session_id, no envelope is constructed."""
-    with pytest.raises(stop_module.AdapterError, match="hook_session_missing"):
-        stop_module.build_envelope(
-            {
-                "transcript_path": "/nonexistent",
-                "prompt_id": "p-123",
-                "last_assistant_message": "world",
-            }
-        )
-
-
-def test_missing_answer_refused(stop_module: Any) -> None:
-    """Without a last_assistant_message, no envelope is constructed."""
-    with pytest.raises(stop_module.AdapterError, match="hook_answer_missing"):
-        stop_module.build_envelope(
-            {
-                "transcript_path": "/nonexistent",
-                "session_id": "s-abc",
-                "prompt_id": "p-123",
-            }
-        )
+def test_alias_conflict_refused(stop_module: Any, tx: Tx) -> None:
+    with pytest.raises(stop_module.AdapterError, match="hook_prompt_id_conflict"):
+        stop_module.candidate_from_hook(hook_for(tx, promptId="p-OTHER"))
 
 
 # ---------------------------------------------------------------------------
@@ -205,123 +198,168 @@ def test_missing_answer_refused(stop_module: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_envelope_projects_assistant_text_verbatim(stop_module: Any, transcript: Path, event: dict[str, Any]) -> None:
-    """The Stop event's assistant_text is stored verbatim — no normalising."""
-    raw = "  Hello, **world**!\n```\ncode block\n```\n"
-    event["transcript_path"] = str(transcript)
-    event["last_assistant_message"] = raw
-    envelope = stop_module.build_envelope(event)
-    assert envelope["assistant_text"] == raw
+def test_voice_envelope_shape(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    first = tx.typed("hello")
+    tx.answer("msg_A", "world")
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    [envelope] = captured
+    assert envelope["event_id"] == f"exchange.v1:claude-code:{SESSION}:msg_A"
+    assert (envelope["user_text"], envelope["assistant_text"]) == ("hello", "world")
+    assert envelope["metadata"]["input_record_ids"] == json.dumps([first], separators=(",", ":"))
+    assert envelope["metadata"]["answer_id"] == "msg_A"
+    # Voice envelopes carry no trigger keys at all: byte-identical to pre-1.7 voice.
+    assert not {"input_kind", "trigger_class", "trigger_record_id", "trigger_text"} & set(envelope)
+    # Hook decoration does not reach metadata, so a replay with a different model
+    # cannot collide.
+    assert "model" not in envelope["metadata"]
 
 
-def test_envelope_carries_event_identity(stop_module: Any, transcript: Path, event: dict[str, Any]) -> None:
-    """The envelope's identity keys come from the runtime, not the event."""
-    event["transcript_path"] = str(transcript)
-    envelope = stop_module.build_envelope(event)
-    assert envelope["actor"] == "aoi"
-    assert envelope["presence"] == "aoi/command-chair"
-    assert envelope["zone"] == "home"
-    assert envelope["source"] == "claude-code"
-    assert envelope["plane"] == "episodic"
+def test_answer_text_is_the_events_verbatim(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    text = "  keep\n\n```\ncode\n```  "
+    tx.typed("q")
+    tx.answer("msg_A", text)
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx, answer=text)), stop_module.runtime_config())
+    assert captured[0]["assistant_text"] == text
 
 
-# ---------------------------------------------------------------------------
-# Transcript lookup
-# ---------------------------------------------------------------------------
+def test_transcript_disagreeing_with_event_text_is_refused(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    tx.typed("q")
+    tx.answer("msg_A", "what the transcript says")
+    with pytest.raises(stop_module.AdapterError, match="answer_text_mismatch"):
+        stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx, answer="what Stop says")), stop_module.runtime_config())
+    assert captured == []
 
 
-def test_ismeta_only_prompt_falls_back(stop_module: Any, tmp_path: Path) -> None:
-    """When the only record under a promptId is `isMeta: true`, accept it.
-
-    This recovers native cross-session messages, which Claude Code
-    delivers as a single `isMeta=true` user record with no non-meta
-    sibling. (See the long comment in `find_prompt_turn`.)
-    """
-    path = _write_transcript(
-        tmp_path,
-        [
-            _prompt_record(prompt_id="p-bridge", text="Cross-session message", is_meta=True),
-        ],
+def test_trigger_envelope_shape(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    rid = tx.task("agent finished")
+    tx.answer("msg_A", "world")
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    [envelope] = captured
+    assert envelope["user_text"] == ""
+    assert (envelope["input_kind"], envelope["trigger_class"], envelope["trigger_record_id"], envelope["trigger_text"]) == (
+        "trigger",
+        "task-notification",
+        rid,
+        "agent finished",
     )
-    turn = stop_module.find_prompt_turn(path, "p-bridge")
-    assert turn["user_text"] == "Cross-session message"
-    assert turn["session_id"] == "s-abc"
 
 
-def test_prompt_id_ambiguous_refused(stop_module: Any, tmp_path: Path) -> None:
-    """Two records under the same promptId with different content refuse closed."""
-    path = _write_transcript(
-        tmp_path,
-        [
-            _prompt_record(text="first"),
-            _prompt_record(text="second"),
-        ],
-    )
-    with pytest.raises(stop_module.AdapterError, match="prompt_id_ambiguous"):
-        stop_module.find_prompt_turn(path, "p-123")
-
-
-def test_tool_result_user_record_excluded(stop_module: Any, tmp_path: Path) -> None:
-    """A type=user record carrying a tool_result is not a prompt carrier.
-
-    Such a record leaves the prompt lookup with no carrier, so the
-    failure surfaces as `prompt_not_found_in_transcript`. The carrier
-    test is its own: if a real prompt had a sibling tool_result under
-    the same promptId, the carrier would still resolve because the
-    record with the actual user text would also be present.
-    """
-    path = tmp_path / "transcript.jsonl"
-    record = {
-        "type": "user",
-        "isMeta": False,
-        "promptId": "p-tr",
-        "sessionId": "s-abc",
-        "message": {
-            "role": "user",
-            "content": [{"type": "tool_result", "content": "tool output"}],
-        },
-    }
-    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
-
-    with pytest.raises(stop_module.AdapterError, match="prompt_not_found_in_transcript"):
-        stop_module.find_prompt_turn(path, "p-tr")
-
-
-def test_corrupt_line_skipped_not_bound(stop_module: Any, tmp_path: Path) -> None:
-    """A corrupt line cannot mis-bind a prompt to the wrong turn.
-
-    Selection is by prompt_id, not position — a span we cannot read
-    simply cannot match.
-    """
-    path = tmp_path / "transcript.jsonl"
-    text = "this is not valid json\n" + json.dumps(_prompt_record()) + "\n"
-    path.write_text(text, encoding="utf-8")
-
-    turn = stop_module.find_prompt_turn(path, "p-123")
-    assert turn["user_text"] == "hello"
-
-
-def test_transcript_session_mismatch_refused(stop_module: Any, tmp_path: Path) -> None:
-    """A prompt record with a sessionId different from the event's session_id is refused."""
-    path = _write_transcript(
-        tmp_path,
-        [
-            _prompt_record(session_id="s-DIFFERENT"),
-        ],
-    )
+def test_transcript_session_mismatch_refused(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    tx.typed("q")
+    tx.answer("msg_A", "world")
     with pytest.raises(stop_module.AdapterError, match="hook_session_transcript_mismatch"):
-        stop_module.build_envelope(
-            {
-                "transcript_path": str(path),
-                "session_id": "s-event",
-                "prompt_id": "p-123",
-                "last_assistant_message": "world",
-            }
+        stop_module.capture_current(
+            stop_module.candidate_from_hook({**hook_for(tx), "session_id": "s-OTHER"}),
+            stop_module.runtime_config(),
         )
 
 
 # ---------------------------------------------------------------------------
-# Failure-path invariants
+# The write race: defer, then resolve
+# ---------------------------------------------------------------------------
+
+
+def test_answer_not_yet_written_is_deferred_not_dropped(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    tx.typed("q")
+    result = stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    assert result is None and captured == []
+    [path] = pending_files(stop_module)
+    assert (path.stat().st_mode & 0o777) == 0o600
+
+
+def test_deferred_candidate_resolves_once_the_answer_lands(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    tx.typed("q")
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    tx.answer("msg_A", "world")
+    drained = stop_module.drain_pending(stop_module.runtime_config(), {})
+    assert [e["event_id"] for e in drained] == [f"exchange.v1:claude-code:{SESSION}:msg_A"]
+    assert pending_files(stop_module) == []
+
+
+def test_still_missing_candidate_counts_an_attempt(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    tx.typed("q")
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    stop_module.drain_pending(stop_module.runtime_config(), {})
+    [path] = pending_files(stop_module)
+    assert json.loads(path.read_text())["attempts"] == 1
+
+
+def test_expired_candidate_is_declined_visibly(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tx.typed("q")
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    monkeypatch.setattr("musubi_claude_pending.MAX_ATTEMPTS", 1)
+    stop_module.drain_pending(stop_module.runtime_config(), {})
+    assert pending_files(stop_module) == []
+    degraded = (stop_module._data_root() / "degraded.jsonl").read_text()
+    assert '"reason": "pending_expired"' in degraded
+
+
+def test_definitive_decline_removes_candidate(stop_module: Any, tx: Tx, captured: list[dict[str, Any]]) -> None:
+    tx.typed("q")
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    tx.answer("msg_A", "not what Stop said")
+    assert stop_module.drain_pending(stop_module.runtime_config(), {}) == []
+    assert pending_files(stop_module) == []
+    degraded = (stop_module._data_root() / "degraded.jsonl").read_text()
+    assert "answer_text_mismatch" in degraded and "not what Stop said" not in degraded
+
+
+def test_one_bad_candidate_does_not_block_another(stop_module: Any, tmp_path: Path, captured: list[dict[str, Any]]) -> None:
+    good = Tx(tmp_path / "good.jsonl")
+    bad = Tx(tmp_path / "bad.jsonl")
+    good.typed("q1", prompt="p-good")
+    bad.typed("q2", prompt="p-bad")
+    config = stop_module.runtime_config()
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(good, prompt="p-good")), config)
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(bad, prompt="p-bad")), config)
+    good.answer("msg_G", "world")
+    bad.answer("msg_B", "a different text")
+    drained = stop_module.drain_pending(config, {})
+    assert [e["metadata"]["answer_id"] for e in drained] == ["msg_G"]
+
+
+# ---------------------------------------------------------------------------
+# main(): never blocks the session
+# ---------------------------------------------------------------------------
+
+
+def test_main_defers_and_exits_zero(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+
+    tx.typed("q")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(hook_for(tx))))
+    assert stop_module.main([]) == 0
+    assert capsys.readouterr().out.strip() == "{}"
+    assert len(pending_files(stop_module)) == 1
+
+
+def test_main_drain_only_tolerates_session_end_payload(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+
+    tx.typed("q")
+    stop_module.capture_current(stop_module.candidate_from_hook(hook_for(tx)), stop_module.runtime_config())
+    tx.answer("msg_A", "world")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"session_id": SESSION, "reason": "exit"})))
+    assert stop_module.main(["--drain-only"]) == 0
+    assert [e["metadata"]["answer_id"] for e in captured] == ["msg_A"]
+
+
+def test_main_garbage_stdin_degrades(stop_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("not json"))
+    assert stop_module.main([]) == 0
+    assert "adapter_runtime_failed" in (stop_module._data_root() / "degraded.jsonl").read_text()
+
+
+# ---------------------------------------------------------------------------
+# Degraded sink
 # ---------------------------------------------------------------------------
 
 

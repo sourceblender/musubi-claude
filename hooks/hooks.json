@@ -28,6 +28,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PLUGIN_ROOT/scripts/musubi-claude-run\" stop --drain-only",
+            "timeout": 15
+          }
+        ]
       }
     ],
     "Stop": [
@@ -42,6 +51,15 @@
       }
     ],
     "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PLUGIN_ROOT/scripts/musubi-claude-run\" stop --drain-only",
+            "timeout": 15
+          }
+        ]
+      },
       {
         "hooks": [
           {

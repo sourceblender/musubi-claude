@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_stop_envelope import _load_stop_module, _prompt_record, _write_transcript
+from tests.test_stop_envelope import SESSION, Tx, _load_stop_module
 
 OPTION = "CLAUDE_PLUGIN_OPTION_"
 CREDENTIAL_KEYS = ("MUSUBI_API_URL", "MUSUBI_TOKEN", OPTION + "MUSUBI_TOKEN")
@@ -44,8 +44,11 @@ def load_stop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **env: str) -> An
 
 
 def hook_payload(tmp_path: Path) -> str:
-    transcript = _write_transcript(tmp_path, [_prompt_record()])
-    return json.dumps({"transcript_path": str(transcript), "session_id": "s-abc", "prompt_id": "p-123", "last_assistant_message": "world"})
+    # A completed exchange: the answer is already on disk, so Stop captures it now.
+    tx = Tx(tmp_path / "transcript.jsonl")
+    tx.typed("hello")
+    tx.answer("msg_A", "world")
+    return json.dumps({"transcript_path": str(tx.path), "session_id": SESSION, "prompt_id": "p-123", "last_assistant_message": "world"})
 
 
 SETTINGS = {
