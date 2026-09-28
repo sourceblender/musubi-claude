@@ -475,6 +475,21 @@ def test_drain_only_uses_its_own_tighter_budget(
     assert captured == [] and len(pending_files(stop_module)) == 1
 
 
+def test_repeated_stop_keeps_age_and_attempts_but_takes_the_newest_answer(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tx.typed("q")
+    stop_run(stop_module, monkeypatch, hook_for(tx, answer="first draft"))
+    [path] = pending_files(stop_module)
+    before = json.loads(path.read_text())
+    stop_run(stop_module, monkeypatch, hook_for(tx, answer="continued final"))
+    [path] = pending_files(stop_module)
+    after = json.loads(path.read_text())
+    assert after["created_at"] == before["created_at"]
+    assert after["attempts"] == before["attempts"] + 1
+    assert after["answer_text"] == "continued final"
+
+
 # ---------------------------------------------------------------------------
 # main(): never blocks the session
 # ---------------------------------------------------------------------------

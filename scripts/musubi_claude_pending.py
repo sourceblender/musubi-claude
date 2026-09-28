@@ -96,3 +96,12 @@ def remove(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def load(seat_root: Path, key: str) -> Candidate | None:
+    """The saved candidate for this key, or None if absent or unreadable."""
+    path = pending_dir(seat_root) / f"{key}.json"
+    try:
+        return Candidate(**json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        return None

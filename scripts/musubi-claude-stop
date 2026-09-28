@@ -43,7 +43,7 @@ from musubi_claude_exchange import (
     iter_dicts,
     resolve_anchor,
 )
-from musubi_claude_pending import Candidate, expired, load_all, remove, save
+from musubi_claude_pending import Candidate, expired, load, load_all, remove, save
 from musubi_claude_runtime import (
     RuntimeConfig,
     RuntimeConfigError,
@@ -565,6 +565,13 @@ def main(argv: list[str] | None = None) -> int:
         if not drain_only:
             try:
                 candidate = candidate_from_hook(hook)
+                # A repeated Stop for the same prompt keeps the ORIGINAL age and attempt
+                # count, so an answer that never lands cannot renew itself forever. The
+                # answer text is the newest: a Stop-hook continuation can change the final.
+                prior = load(_seat_root(configured), candidate.key)
+                if prior is not None:
+                    candidate.created_at = prior.created_at
+                    candidate.attempts = prior.attempts
                 # Saved BEFORE any capture attempt: from here on, nothing that fails
                 # (enqueue, stage, a killed hook) can lose this exchange.
                 save(_seat_root(configured), candidate)
