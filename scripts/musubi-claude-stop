@@ -368,6 +368,9 @@ POLL_INTERVAL_SECONDS = 0.25
 DRAIN_BUDGET_SECONDS = 4.0
 DRAIN_MAX_OLDER = 5
 CURRENT_START_LIMIT_SECONDS = 8.0
+# SessionStart/SessionEnd give --drain-only 15 s: start work only in the first second,
+# so the worst case is 1 + 8 (enqueue) + 5 (stage) = 14 s (Yua, gate on 9c3ead7).
+DRAIN_ONLY_BUDGET_SECONDS = 1.0
 REMOTE_START_LIMIT_SECONDS = 4.0
 # Retryable: the answer is not on disk yet, the transcript is briefly unreadable, or
 # local infrastructure (identity config, enqueue, stage) failed. The candidate stays
@@ -492,7 +495,12 @@ def _retry(path: Path, candidate: Candidate, configured: RuntimeConfig, scope: d
 
 
 def drain(
-    configured: RuntimeConfig, hook: Any, *, current_key: str | None = None, started: float | None = None
+    configured: RuntimeConfig,
+    hook: Any,
+    *,
+    current_key: str | None = None,
+    started: float | None = None,
+    budget: float | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve pending candidates OLDEST FIRST, then the current Stop's (with its short
     poll). Each candidate is its own unit: a failure is recorded by name and the loop
@@ -509,7 +517,8 @@ def drain(
     current = [(p, c) for p, c in readable if c.key == current_key]
     started = time.monotonic() if started is None else started
     for index, (path, candidate) in enumerate(older):
-        if index >= DRAIN_MAX_OLDER or time.monotonic() - started > DRAIN_BUDGET_SECONDS:
+        limit = DRAIN_BUDGET_SECONDS if budget is None else budget
+        if index >= DRAIN_MAX_OLDER or time.monotonic() - started > limit:
             break
         scope = {**_degraded_scope(hook), "session_id": candidate.session_id}
         outcome, envelope = _process(path, candidate, configured, scope)
@@ -562,7 +571,13 @@ def main(argv: list[str] | None = None) -> int:
                 current_key = candidate.key
             except AdapterError as exc:
                 _record_degraded(str(exc), _degraded_scope(hook))
-        captured = drain(configured, hook, current_key=current_key, started=started)
+        captured = drain(
+            configured,
+            hook,
+            current_key=current_key,
+            started=started,
+            budget=DRAIN_ONLY_BUDGET_SECONDS if drain_only else None,
+        )
         if captured and not drain_only and time.monotonic() - started <= REMOTE_START_LIMIT_SECONDS:
             _drain_remote(captured[-1], configured, hook)
     except (AdapterError, json.JSONDecodeError, OSError, subprocess.SubprocessError, RuntimeConfigError) as exc:

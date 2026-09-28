@@ -463,6 +463,18 @@ def test_remote_pass_is_skipped_when_local_work_spent_the_budget(
     assert len(captured) == 1 and remote == []
 
 
+def test_drain_only_uses_its_own_tighter_budget(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SessionStart/End have 15 s, so drain-only starts work only inside its own limit."""
+    tx.typed("q")
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    tx.answer("msg_A", "world")
+    monkeypatch.setattr(stop_module, "DRAIN_ONLY_BUDGET_SECONDS", -1.0)
+    stop_run(stop_module, monkeypatch, {}, drain_only=True)
+    assert captured == [] and len(pending_files(stop_module)) == 1
+
+
 # ---------------------------------------------------------------------------
 # main(): never blocks the session
 # ---------------------------------------------------------------------------
