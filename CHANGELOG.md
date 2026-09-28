@@ -5,6 +5,18 @@ All notable changes to `musubi-claude` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/sourceblender/musubi-claude/compare/v0.7.1...v0.8.0) (2026-09-28)
+
+
+### Features
+
+* capture Claude exchanges by terminal answer (exchange-identity contract) ([#39](https://github.com/sourceblender/musubi-claude/issues/39)) ([cd28778](https://github.com/sourceblender/musubi-claude/commit/cd2877880e90810e6b0ebaf024580fb21163d68d))
+
+
+### Documentation
+
+* scope security policy to Claude plugin ([#37](https://github.com/sourceblender/musubi-claude/issues/37)) ([2345005](https://github.com/sourceblender/musubi-claude/commit/23450057049f5d9826cc28c084458524acdf9adb))
+
 ## [0.7.1](https://github.com/sourceblender/musubi-claude/compare/v0.7.0...v0.7.1) (2026-09-27)
 
 
