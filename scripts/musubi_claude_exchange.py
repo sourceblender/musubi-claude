@@ -184,7 +184,8 @@ def _prompt_id_of(record: dict[str, Any], by_uuid: dict[str, dict[str, Any]]) ->
         prompt_id = current.get("promptId")
         if isinstance(prompt_id, str) and prompt_id:
             return prompt_id
-        current = by_uuid.get(current.get("parentUuid"))
+        parent = current.get("parentUuid")
+        current = by_uuid.get(parent) if isinstance(parent, str) else None
     raise ExchangeError("parent_chain_unbounded")
 
 
