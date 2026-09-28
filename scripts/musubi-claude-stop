@@ -357,10 +357,18 @@ def _record_degraded(reason: str, scope: dict[str, str] | None = None) -> None:
 # pending file is the correctness guarantee, not the poll.
 POLL_ATTEMPTS = 5
 POLL_INTERVAL_SECONDS = 0.25
-# Older candidates drain first, inside a bounded slice of the hook budget. The current
-# candidate is always attempted after them, whatever the slice used.
+# Budget, measured from hook start against the 30 s Stop timeout (Yua's gate on 5f003e6).
+# One candidate can cost enqueue (8 s) + stage (5 s) once started, so every limit below
+# is a limit on STARTING work, chosen so the worst case finishes inside the timeout:
+#   older candidates start only before 4 s   -> worst 4 + 13 = 17 s
+#   the current candidate starts only before 8 s, else it stays saved for the next hook
+#                                             -> worst 8 + ~1 s poll + 13 = 22 s
+#   the 24 s remote pass starts only before 4 s, else the next Stop's batch delivers it
+# Nothing is lost by stopping early: every candidate is on disk before any attempt.
 DRAIN_BUDGET_SECONDS = 4.0
 DRAIN_MAX_OLDER = 5
+CURRENT_START_LIMIT_SECONDS = 8.0
+REMOTE_START_LIMIT_SECONDS = 4.0
 # Retryable: the answer is not on disk yet, the transcript is briefly unreadable, or
 # local infrastructure (identity config, enqueue, stage) failed. The candidate stays
 # pending until musubi_claude_pending's bounded expiry. Every other ExchangeError is a
@@ -434,7 +442,9 @@ def _drain_remote(envelope: dict[str, Any], configured: RuntimeConfig, hook: Any
                 _record_degraded(f"delivery_stalled:{stalled}", _degraded_scope(hook))
 
 
-RESOLVED, RETRY, DECLINED = "resolved", "retry", "declined"
+# NOT_YET_OUTCOME is the only outcome worth polling for: the answer is a beat away.
+# RETRY is infrastructure; polling it would spend the hook budget on a broken harness.
+RESOLVED, RETRY, DECLINED, NOT_YET_OUTCOME = "resolved", "retry", "declined", "not_yet"
 
 
 def _process(path: Path, candidate: Candidate, configured: RuntimeConfig, scope: dict[str, str]) -> tuple[str, dict[str, Any] | None]:
@@ -444,7 +454,7 @@ def _process(path: Path, candidate: Candidate, configured: RuntimeConfig, scope:
         envelope = envelope_for(candidate)
     except ExchangeError as exc:
         if str(exc) == NOT_YET:
-            return RETRY, None
+            return NOT_YET_OUTCOME, None
         _record_degraded(str(exc), scope)
         remove(path)
         return DECLINED, None
@@ -467,8 +477,13 @@ def _process(path: Path, candidate: Candidate, configured: RuntimeConfig, scope:
     return RESOLVED, envelope
 
 
-def _retry(path: Path, candidate: Candidate, configured: RuntimeConfig, scope: dict[str, str]) -> None:
-    candidate.attempts += 1
+def _retry(path: Path, candidate: Candidate, configured: RuntimeConfig, scope: dict[str, str],
+           *, not_yet: bool) -> None:
+    # attempts bounds "the answer never lands". An infrastructure failure (harness down,
+    # identity config broken) is bounded by AGE only, so an outage spanning twenty hooks
+    # does not expire real memories; each failure is already named as pending_retry.
+    if not_yet:
+        candidate.attempts += 1
     if expired(candidate):
         _record_degraded("pending_expired", scope)
         remove(path)
@@ -476,7 +491,9 @@ def _retry(path: Path, candidate: Candidate, configured: RuntimeConfig, scope: d
         save(_seat_root(configured), candidate)
 
 
-def drain(configured: RuntimeConfig, hook: Any, *, current_key: str | None = None) -> list[dict[str, Any]]:
+def drain(
+    configured: RuntimeConfig, hook: Any, *, current_key: str | None = None, started: float | None = None
+) -> list[dict[str, Any]]:
     """Resolve pending candidates OLDEST FIRST, then the current Stop's (with its short
     poll). Each candidate is its own unit: a failure is recorded by name and the loop
     continues, so one bad candidate never blocks another or hides earlier successes."""
@@ -490,28 +507,30 @@ def drain(configured: RuntimeConfig, hook: Any, *, current_key: str | None = Non
     readable.sort(key=lambda item: item[1].created_at)
     older = [(p, c) for p, c in readable if c.key != current_key]
     current = [(p, c) for p, c in readable if c.key == current_key]
-    deadline = time.monotonic() + DRAIN_BUDGET_SECONDS
+    started = time.monotonic() if started is None else started
     for index, (path, candidate) in enumerate(older):
-        if index >= DRAIN_MAX_OLDER or time.monotonic() > deadline:
+        if index >= DRAIN_MAX_OLDER or time.monotonic() - started > DRAIN_BUDGET_SECONDS:
             break
         scope = {**_degraded_scope(hook), "session_id": candidate.session_id}
         outcome, envelope = _process(path, candidate, configured, scope)
         if outcome == RESOLVED and envelope is not None:
             captured.append(envelope)
-        elif outcome == RETRY:
-            _retry(path, candidate, configured, scope)
+        elif outcome in (RETRY, NOT_YET_OUTCOME):
+            _retry(path, candidate, configured, scope, not_yet=outcome == NOT_YET_OUTCOME)
     for path, candidate in current:
+        if time.monotonic() - started > CURRENT_START_LIMIT_SECONDS:
+            break  # saved already; the next hook resolves it
         scope = {**_degraded_scope(hook), "session_id": candidate.session_id}
         for attempt in range(POLL_ATTEMPTS):
             outcome, envelope = _process(path, candidate, configured, scope)
-            if outcome != RETRY:
+            if outcome != NOT_YET_OUTCOME:
                 break
             if attempt + 1 < POLL_ATTEMPTS:
                 time.sleep(POLL_INTERVAL_SECONDS)
         if outcome == RESOLVED and envelope is not None:
             captured.append(envelope)
-        elif outcome == RETRY:
-            _retry(path, candidate, configured, scope)
+        elif outcome in (RETRY, NOT_YET_OUTCOME):
+            _retry(path, candidate, configured, scope, not_yet=outcome == NOT_YET_OUTCOME)
     return captured
 
 
@@ -520,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
     # SessionStart / SessionEnd run with --drain-only: they resolve and stage locally
     # but leave the network pass to the next Stop, which has the budget for it.
     drain_only = "--drain-only" in args
+    started = time.monotonic()
     hook: Any = None
     try:
         raw = sys.stdin.read()
@@ -542,8 +562,8 @@ def main(argv: list[str] | None = None) -> int:
                 current_key = candidate.key
             except AdapterError as exc:
                 _record_degraded(str(exc), _degraded_scope(hook))
-        captured = drain(configured, hook, current_key=current_key)
-        if captured and not drain_only:
+        captured = drain(configured, hook, current_key=current_key, started=started)
+        if captured and not drain_only and time.monotonic() - started <= REMOTE_START_LIMIT_SECONDS:
             _drain_remote(captured[-1], configured, hook)
     except (AdapterError, json.JSONDecodeError, OSError, subprocess.SubprocessError, RuntimeConfigError) as exc:
         reason = str(exc) if isinstance(exc, (AdapterError, RuntimeConfigError)) else "adapter_runtime_failed"

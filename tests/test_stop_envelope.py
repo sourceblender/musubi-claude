@@ -418,6 +418,51 @@ def test_drain_only_never_talks_to_musubi(
     assert len(captured) == 1 and calls == []
 
 
+# Yua's gate on 5f003e6: the hook budget.
+
+
+def test_failing_enqueue_is_not_polled(stop_module: Any, tx: Tx, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a not-yet-written answer is worth polling. A broken harness is not."""
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def broken(envelope: dict[str, Any], configured: Any) -> None:
+        calls.append(envelope["metadata"]["answer_id"])
+        raise stop_module.AdapterError("shadow_enqueue_failed:exit=1")
+
+    monkeypatch.setattr(stop_module, "_enqueue", broken)
+    monkeypatch.setattr(stop_module.time, "sleep", sleeps.append)
+    tx.typed("q")
+    tx.answer("msg_A", "world")
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    assert calls == ["msg_A"] and sleeps == []
+    [path] = pending_files(stop_module)
+    # An infrastructure failure does not spend the not-yet attempt budget.
+    assert json.loads(path.read_text())["attempts"] == 0
+
+
+def test_current_candidate_waits_when_the_budget_is_spent(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(stop_module, "CURRENT_START_LIMIT_SECONDS", -1.0)
+    tx.typed("q")
+    tx.answer("msg_A", "world")
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    assert captured == [] and len(pending_files(stop_module)) == 1
+
+
+def test_remote_pass_is_skipped_when_local_work_spent_the_budget(
+    stop_module: Any, tx: Tx, captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote: list[str] = []
+    monkeypatch.setattr(stop_module, "_drain_remote", lambda *a: remote.append("remote"))
+    monkeypatch.setattr(stop_module, "REMOTE_START_LIMIT_SECONDS", -1.0)
+    tx.typed("q")
+    tx.answer("msg_A", "world")
+    stop_run(stop_module, monkeypatch, hook_for(tx))
+    assert len(captured) == 1 and remote == []
+
+
 # ---------------------------------------------------------------------------
 # main(): never blocks the session
 # ---------------------------------------------------------------------------
