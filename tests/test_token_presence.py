@@ -160,8 +160,9 @@ def test_the_check_is_the_shared_harness_helper(monkeypatch: pytest.MonkeyPatch,
 
 
 def test_an_older_harness_skips_the_check_instead_of_forcing_setup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # Minimum stays 1.1.1 (harness-minimum): a venv without musubi_harness.tokens
-    # still runs SessionStart, byte-identical to a token that fits.
+    # A venv whose harness lacks musubi_harness.tokens still runs SessionStart,
+    # byte-identical to a token that fits. (The minimum is now 1.7.0 for trigger
+    # envelopes; this guards the import boundary, not the pin.)
     monkeypatch.setitem(sys.modules, "musubi_harness.tokens", None)  # import now raises ImportError
     module = load(monkeypatch, tmp_path, VOICE)
     assert module.token_presence_problems is None
