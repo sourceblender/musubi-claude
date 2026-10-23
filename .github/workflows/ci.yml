@@ -82,4 +82,4 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Validate plugin + marketplace manifests
-        run: claude plugin validate --strict .
+        run: python3 .github/scripts/validate_plugin.py
