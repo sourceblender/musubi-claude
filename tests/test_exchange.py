@@ -335,3 +335,92 @@ def test_message_only_command_record_is_context_not_a_trigger() -> None:
     t.assistant("m1", "a", "end_turn")
     with pytest.raises(X.ExchangeError, match="no_eligible_input"):
         exchange_at(t, "m1")
+
+
+# The harness writes this record when a person stops a turn mid-tool. Shape measured
+# 10/10 on 2026-10-13 across four projects: no promptSource, no origin, list content
+# holding exactly the marker, and an interruptedMessageId naming the stopped message.
+def _interrupt(t: T, prompt: str, *, marker: str = X.INTERRUPT_MARKER, **extra: Any) -> str:
+    fields: dict[str, Any] = {"interruptedMessageId": "m0"}
+    fields.update(extra)
+    uid = t.user("", prompt, source=None, origin=None, **fields)
+    t.records[-1]["message"]["content"] = [{"type": "text", "text": marker}]
+    return uid
+
+
+def test_interrupt_marker_is_context_and_the_exchange_is_kept() -> None:
+    t = T()
+    first = t.user("search for it", "p1")
+    t.assistant("m0", None, "tool_use")
+    _interrupt(t, "p1")
+    second = t.user("never mind, do this", "p2")
+    t.assistant("m1", "ok", "end_turn")
+    e = exchange_at(t, "m1")
+    assert [i.record_id for i in e.inputs] == [first, second]
+    assert all(X.INTERRUPT_MARKER not in i.text for i in e.inputs)
+    assert e.trigger is None
+
+
+def test_interrupt_marker_alone_is_not_input() -> None:
+    t = T()
+    t.user("q", "p1")
+    t.assistant("m0", "a", "end_turn")
+    _interrupt(t, "p1")
+    t.assistant("m1", "resumed", "end_turn")
+    with pytest.raises(X.ExchangeError, match="no_eligible_input"):
+        exchange_at(t, "m1")
+
+
+def test_marker_text_without_interrupted_id_still_declines() -> None:
+    t = T()
+    t.user(X.INTERRUPT_MARKER, "p1", source=None, origin=None)
+    t.assistant("m1", "a", "end_turn")
+    with pytest.raises(X.ExchangeError, match="input_unclassified"):
+        exchange_at(t, "m1")
+
+
+@pytest.mark.parametrize("interrupted_id", [None, "", 7, {"id": "m0"}])
+def test_malformed_interrupted_id_still_declines(interrupted_id: Any) -> None:
+    t = T()
+    _interrupt(t, "p1", interruptedMessageId=interrupted_id)
+    t.assistant("m1", "a", "end_turn")
+    with pytest.raises(X.ExchangeError, match="input_unclassified"):
+        exchange_at(t, "m1")
+
+
+@pytest.mark.parametrize(
+    "marker", ["[Request interrupted by user] and then some", "please stop", "[Request interrupted by user for tool use]"]
+)
+def test_interrupted_id_with_other_text_still_declines(marker: str) -> None:
+    t = T()
+    _interrupt(t, "p1", marker=marker)
+    t.assistant("m1", "a", "end_turn")
+    with pytest.raises(X.ExchangeError, match="input_unclassified"):
+        exchange_at(t, "m1")
+
+
+def test_typed_interrupt_marker_text_is_voice() -> None:
+    # promptSource wins: a person who types the marker is still speaking.
+    t = T()
+    u = t.user(X.INTERRUPT_MARKER, "p1", interruptedMessageId="m0")
+    t.assistant("m1", "a", "end_turn")
+    assert [i.record_id for i in exchange_at(t, "m1").inputs] == [u]
+
+
+def test_interrupt_marker_with_an_attachment_still_declines() -> None:
+    t = T()
+    _interrupt(t, "p1")
+    t.records[-1]["message"]["content"].append({"type": "image", "source": {}})
+    t.assistant("m1", "a", "end_turn")
+    with pytest.raises(X.ExchangeError, match="input_unclassified"):
+        exchange_at(t, "m1")
+
+
+@pytest.mark.parametrize("origin", [{"kind": "human"}, {"kind": 7}, {}, None, "human"])
+def test_interrupt_marker_with_any_origin_still_declines(origin: Any) -> None:
+    t = T()
+    _interrupt(t, "p1")
+    t.records[-1]["origin"] = origin
+    t.assistant("m1", "a", "end_turn")
+    with pytest.raises(X.ExchangeError, match="input_unclassified"):
+        exchange_at(t, "m1")

@@ -44,6 +44,11 @@ COMMAND_PREFIX = "<command-name>"
 # 13/13 on 2026-09-28; it is the command record itself, not context.
 COMMAND_MESSAGE_PREFIX = "<command-message>"
 STDOUT_PREFIX = "<local-command-stdout>"
+# Written by the host when a person stops a turn mid-tool: one text block holding exactly
+# this, no promptSource, no origin, and interruptedMessageId naming the stopped message.
+# Measured 10/10 across four projects on 2026-10-13; every one declined the exchange as
+# input_unclassified until this was classified (#42).
+INTERRUPT_MARKER = "[Request interrupted by user]"
 
 # Bounds for walking parentUuid chains; a real chain is far shorter, and a cycle in
 # a corrupt transcript must end in a decline rather than a hang.
@@ -138,7 +143,27 @@ def classify_user(record: dict[str, Any]) -> tuple[str, str | None]:
             return (MACHINE, TRIGGER_SLASH) if COMMAND_PREFIX in text else (MACHINE, None)
         if text.startswith(STDOUT_PREFIX):
             return STDOUT, None
+        if _is_interrupt_marker(record):
+            return MACHINE, None
     return UNCLASSIFIED, None
+
+
+def _is_interrupt_marker(record: dict[str, Any]) -> bool:
+    """The host's stop record: structure AND exact text, or it stays unclassified.
+
+    Neither half alone is evidence. The text is something a person can type, and the
+    key alone says nothing about what the record holds. Only reached when promptSource
+    is absent, so a typed marker is still voice.
+    """
+    interrupted = record.get("interruptedMessageId")
+    if not isinstance(interrupted, str) or not interrupted.strip():
+        return False
+    if "origin" in record:
+        return False  # absent, not merely unparseable: the measured record has no origin key
+    content = (record.get("message") or {}).get("content")
+    if isinstance(content, list) and not all(isinstance(b, dict) and b.get("type") == "text" for b in content):
+        return False  # an image or file alongside the marker is not the bare stop record
+    return _text(record).strip() == INTERRUPT_MARKER
 
 
 def _terminal_answers(records: list[dict[str, Any]]) -> list[tuple[int, str, dict[str, Any]]]:
