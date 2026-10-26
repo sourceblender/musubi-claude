@@ -43,6 +43,7 @@ from musubi_claude_exchange import (
     iter_dicts,
     resolve_anchor,
 )
+import musubi_claude_binding as binding
 from musubi_claude_pending import Candidate, expired, load, load_all, remove, save
 from musubi_claude_runtime import (
     RuntimeConfig,
@@ -53,6 +54,7 @@ from musubi_claude_runtime import (
     plugin_config,
     local_tool_environment,
     runtime_config,
+    seat_transport_source,
     tool_environment,
 )
 
@@ -380,6 +382,22 @@ NOT_YET = "answer_not_in_transcript"
 DEFINITIVE_ADAPTER_REASONS = frozenset({"hook_session_transcript_mismatch"})
 
 
+def _binding_check(candidate: Candidate, configured: RuntimeConfig) -> tuple[str | None, str | None]:
+    """(blocking reason, advisory reason) for this turn's identity against its prompt's.
+
+    Only ever applied to the candidate from THIS hook's payload, never to a drained
+    one: the binding holds the session's latest prompt, so re-comparing an older
+    pending candidate against it would mismatch for the wrong reason. A drained
+    candidate needs no check — it exists only because this passed at its own Stop,
+    and _seat_root puts it under that actor, where a drain as anyone else cannot
+    reach it.
+    """
+    bound = binding.read(binding.fixed_root(), candidate.session_id)
+    if bound is None:
+        return None, None
+    return binding.mismatch(bound, configured.actor, configured.presence, configured.zone, seat_transport_source)
+
+
 def _seat_root(configured: RuntimeConfig) -> Path:
     return _data_root() / configured.actor / configured.zone
 
@@ -565,6 +583,14 @@ def main(argv: list[str] | None = None) -> int:
         if not drain_only:
             try:
                 candidate = candidate_from_hook(hook)
+                # Checked BEFORE the save below: that save is the point from which
+                # nothing can lose the exchange, so it is also the point from which
+                # nothing can stop it being attributed to the wrong seat.
+                blocking, advisory = _binding_check(candidate, configured)
+                if advisory:
+                    _record_degraded(advisory, _degraded_scope(hook))
+                if blocking:
+                    raise AdapterError(blocking)
                 # A repeated Stop for the same prompt keeps the ORIGINAL age and attempt
                 # count, so an answer that never lands cannot renew itself forever. The
                 # answer text is the newest: a Stop-hook continuation can change the final.

@@ -22,6 +22,11 @@ import sys
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
+from musubi_claude_seat_env import (
+    apply_seat_transport_file,
+    read_seat_transport,
+    seat_transport_path,
+)
 from musubi_harness.plugin_runtime import (
     PluginRuntime,
     RuntimeConfig,
@@ -67,6 +72,14 @@ def apply_transport_settings(env: MutableMapping[str, str]) -> str:
 # (Aoi's 0.5.0 canary: a local-scope install still wrote her identity globally).
 _SEAT_OWNED_OPTIONS = ("ACTOR", "SEAT", "ZONE", "DELIVERY_MODE", "MUSUBI_URL", "MUSUBI_TOKEN")
 
+# Where this process's transport came from, for health. Set by
+# apply_seat_environment; see musubi_claude_seat_env for the labels.
+seat_transport_source = "none"
+# The seat file this process would read, named whether or not it supplied anything,
+# so health and SessionStart can point at the object instead of a <actor> pattern.
+# Empty when no seat file is in play at all (no actor, or an actor that names none).
+seat_transport_file = ""
+
 
 def apply_seat_environment(env: MutableMapping[str, str]) -> bool:
     """A seat whose launcher sets MUSUBI_ACTOR owns identity AND transport.
@@ -79,12 +92,20 @@ def apply_seat_environment(env: MutableMapping[str, str]) -> bool:
     supplies MUSUBI_API_URL and MUSUBI_TOKEN. Without those two the harness falls
     back to whatever memory-data is configured; health reports which one runs.
 
+    "Supplies" means the launcher's exports OR this seat's own credential file
+    (``apply_seat_transport_file``), so a host that never runs the launcher is
+    not left owning an identity it has no transport for.
+
     Returns True when the seat owns its identity.
     """
+    global seat_transport_source, seat_transport_file
     if not env.get("MUSUBI_ACTOR", "").strip():
         return False
     for key in _SEAT_OWNED_OPTIONS:
         env.pop(_OPTION + key, None)
+    candidate = seat_transport_path(env)
+    seat_transport_file = "" if candidate is None else str(candidate)
+    seat_transport_source = apply_seat_transport_file(env)
     venv_bin = Path(sys.executable).parent
     harness = venv_bin / "musubi-harness"
     if not env.get("MUSUBI_HARNESS_BIN", "").strip() and harness.is_file():
@@ -200,6 +221,11 @@ __all__ = [
     "RuntimeConfigError",
     "STATE_NAME",
     "apply_plugin_settings",
+    "apply_seat_transport_file",
+    "read_seat_transport",
+    "seat_transport_path",
+    "seat_transport_file",
+    "seat_transport_source",
     "settings_source",
     "resolve_state_root",
     "state_root_source",

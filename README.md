@@ -113,6 +113,56 @@ The plugin passes the URL and token to the harness as `MUSUBI_API_URL` /
 them. With musubi-harness 1.1.0 or later, that is all a remote install needs:
 the harness's bundled HTTP client talks to Musubi directly.
 
+**A seat's own transport file.** A process that sets `MUSUBI_ACTOR` owns its
+identity *and* its transport: the per-user settings above are never consulted
+for it, because on a machine where several seats share one OS user they would
+all run with whoever last saved `/config`. Such a seat normally gets
+`MUSUBI_API_URL` and `MUSUBI_TOKEN` from its launcher — but a host that starts
+Claude Code without one (the desktop app, cron, launchd) then has an identity
+and no transport at all. So the seat may instead keep them in
+`~/.musubi/musubi-mcp-<actor>.env`, or wherever `MUSUBI_SEAT_ENV_FILE` points:
+
+```sh
+MUSUBI_API_URL=https://musubi.example.com
+MUSUBI_TOKEN=<the seat's JWT>
+```
+
+Only those two keys are read from it, so the file can never change identity,
+and only when the launcher did not already set them — an export always wins.
+The file must not be readable by group or others (`chmod 600`); a looser one is
+refused, and `/musubi-claude:health` reports `transport_source` and
+`transport_file` either way.
+
+**Stated limit: whoever controls a project's `env` block chooses which seat that
+project runs as.** `MUSUBI_ACTOR` selects the identity, and with this route it
+also selects which credential file is read — directly, or through
+`MUSUBI_SEAT_ENV_FILE` or `HOME`. All of a user's seat files are owned by that
+one OS user, so the `chmod 600` check separates *users*, not *seats*: it cannot
+stop one of your projects from loading another of your seats' tokens. That is
+the design. A seat's identity is its configuration, and a project's settings are
+part of that configuration; the alternative — deriving identity from the host —
+is the thing this plugin refuses outright. The boundary this file does not cross
+is the OS user: nothing here lets a project read a *different* user's seat file,
+and the server's own scope check still refuses a token that does not match the
+actor claiming it. So treat a project's `.claude/settings.json` as a credential
+selector, and do not put one in a repository you would not hand your seat token
+to. `/musubi-claude:health` names the file that loaded, for exactly this reason.
+
+**The identity a turn is captured under is the identity it was prompted under.**
+Claude Code re-reads the project's `settings.json` `env` block while a turn is
+running, and each hook process gets the value current at its own spawn — so
+`MUSUBI_ACTOR` can differ between the `UserPromptSubmit` that began a turn and
+the `Stop` that captures it. `UserPromptSubmit` therefore writes the prompting
+actor, presence and zone to
+`~/.local/state/musubi-claude/prompt-identity/`, and `Stop` compares before the
+capture becomes durable. That path is deliberately *not* under the plugin's data
+directory: the harness resolves that from `PLUGIN_DATA`, which the same `env`
+block sets and can change mid-turn alongside `MUSUBI_ACTOR`, which would let a
+co-flip move the binding out from under the check. It comes from the OS user's
+password-database home, not `$HOME`, and is not configurable. On a mismatch the turn is declined with
+`identity_changed_mid_turn` in `degraded.jsonl` rather than attributed to either
+seat. A missing binding (the hook never ran) captures as it always did.
+
 **Legacy sources**, used only when **Musubi actor** is empty: the
 `MUSUBI_ACTOR` / `MUSUBI_PRESENCE` / `MUSUBI_ZONE` / `MUSUBI_DELIVERY_MODE`
 environment variables, or a `config.json` in the plugin data directory:

@@ -67,7 +67,13 @@ def _load_stop_module() -> Any:
 
 @pytest.fixture
 def stop_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
-    """Load the stop script with a fake identity and a per-test plugin-data dir."""
+    """Load the stop script with a fake identity and a per-test plugin-data dir.
+
+    HOME is isolated: a seat reads ~/.musubi/musubi-mcp-<actor>.env, and "aoi" is
+    a real seat on the machines this is developed on — without this, a test run
+    would pull that seat's live token into the process.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
     monkeypatch.setenv("MUSUBI_ACTOR", "aoi")
     monkeypatch.setenv("MUSUBI_PRESENCE", "aoi/command-chair")
     monkeypatch.setenv("MUSUBI_ZONE", "home")
