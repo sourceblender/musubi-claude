@@ -6,17 +6,41 @@
 # The Bash tool does not receive CLAUDE_PLUGIN_DATA, so /musubi-claude:health
 # passes it as --plugin-data. An empty value means the plugin data dir is
 # unknown; say so rather than silently reading the legacy root.
-if [ "${1:-}" = "--plugin-data" ]; then
-  if [ -z "${2:-}" ]; then
+
+# blank VALUE: true when VALUE is empty or only whitespace. A space is as
+# unknown as nothing, and would otherwise reach the legacy root (Shiori's review).
+blank() {
+  case "$1" in
+    *[![:space:]]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# --plugin-data may come after other arguments ("--probe --plugin-data DIR").
+# Take it out wherever it is and keep the rest in order for the health script.
+flag=0 value=""
+n=$#
+while [ "$n" -gt 0 ]; do
+  arg="$1"; shift; n=$((n - 1))
+  if [ "$flag" = 0 ] && [ "$arg" = "--plugin-data" ]; then
+    flag=1
+    if [ "$n" -gt 0 ]; then value="$1"; shift; n=$((n - 1)); fi
+    continue
+  fi
+  set -- "$@" "$arg"
+done
+
+if [ "$flag" = 1 ]; then
+  if blank "$value"; then
     printf '%s\n' '{"error": "plugin_data_unknown", "detail": "--plugin-data was empty; run /musubi-claude:health from Claude Code"}'
     exit 0
   fi
-  CLAUDE_PLUGIN_DATA="$2"; export CLAUDE_PLUGIN_DATA; shift 2
+  CLAUDE_PLUGIN_DATA="$value"; export CLAUDE_PLUGIN_DATA
 fi
 # Unset is the same unknown as empty, and the common case: a bare call from the
 # Bash tool. Falling through would read the legacy root, find no venv there, and
 # tell a working install to run setup.
-if [ -z "${CLAUDE_PLUGIN_DATA:-}" ]; then
+if blank "${CLAUDE_PLUGIN_DATA:-}"; then
   printf '%s\n' '{"error": "plugin_data_unknown", "detail": "CLAUDE_PLUGIN_DATA is not set, so the plugin environment cannot be found; this says nothing about setup", "fix": "run /musubi-claude:health from Claude Code, or pass --plugin-data <dir>"}'
   exit 0
 fi

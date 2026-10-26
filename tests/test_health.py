@@ -183,6 +183,39 @@ def test_unset_plugin_data_is_reported_not_called_a_missing_setup(tmp_path: Path
     assert not (tmp_path / ".local" / "state" / "musubi-claude" / "degraded.jsonl").exists()
 
 
+def test_whitespace_plugin_data_is_as_unknown_as_empty(tmp_path: Path) -> None:
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    for args, extra_env in ((["--plugin-data", "  "], {}), ([], {"CLAUDE_PLUGIN_DATA": " \t"})):
+        done = subprocess.run(
+            ["sh", str(ROOT / "bin" / "musubi-claude-health"), *args],
+            capture_output=True,
+            text=True,
+            env={**env, **extra_env},
+            timeout=30,
+        )
+        assert done.returncode == 0
+        report = json.loads(done.stdout)
+        assert report["error"] == "plugin_data_unknown", args
+        assert "setup" not in report
+
+
+def test_plugin_data_flag_is_found_after_other_arguments(tmp_path: Path) -> None:
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    done = subprocess.run(
+        ["sh", str(ROOT / "bin" / "musubi-claude-health"), "--probe", "--plugin-data", str(tmp_path / "explicit")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert done.returncode == 0
+    # The explicit dir was used: not set up there, and the legacy root was not read.
+    report = json.loads(done.stdout)
+    assert report.get("error") != "plugin_data_unknown"
+    assert report["setup"] is False
+    assert not (tmp_path / ".local").exists()
+
+
 def test_setup_refuses_without_a_plugin_data_dir(tmp_path: Path) -> None:
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
     for args in (["--plugin-data", ""], []):
