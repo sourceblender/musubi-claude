@@ -30,9 +30,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+STATE_NAME = "musubi-claude"
 
 # A binding older than this cannot belong to a live turn; a resumed session that
 # never re-prompted is treated as unbound rather than compared against a stale row.
@@ -52,6 +55,33 @@ class Binding:
     zone: str
     transport_source: str
     at: float
+
+
+def fixed_root() -> Path:
+    """The binding's root, chosen so the project's env block cannot move it.
+
+    Aoi's second review found the first version of this guard storing its evidence
+    somewhere the attack could reach: the binding lived under ``data_root()``, which
+    the harness resolves from ``PLUGIN_DATA`` first, and ``PLUGIN_DATA`` comes from
+    the same project ``env`` block as ``MUSUBI_ACTOR`` and is re-read mid-turn the
+    same way. Flip both and Stop looks in the new folder, finds nothing, and
+    "absent means proceed" lets the capture through under the new seat — into an
+    outbox that is also under the new root, so the drain delivers it. She probed it
+    with this file's own test helpers.
+
+    So the root comes from the password database, not from the environment:
+    ``$HOME`` is just another variable that block can set. Nothing here is
+    configurable on purpose — a knob would re-open the hole. Tests substitute this
+    function rather than an env var, for the same reason.
+
+    A home that cannot be resolved at all falls back to ``Path.home()``: a binding
+    in a movable place still catches every case except a deliberate co-flip, and is
+    strictly better than no binding.
+    """
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state" / STATE_NAME
+    except (KeyError, OSError):
+        return Path.home() / ".local" / "state" / STATE_NAME
 
 
 def binding_dir(root: Path) -> Path:

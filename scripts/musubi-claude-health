@@ -99,6 +99,9 @@ def report(probe: bool, event_id: str | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "settings_source": rt.settings_source,
         "transport_source": rt.seat_transport_source,
+        # The path, not the <actor> pattern: a seat reading the wrong file is the
+        # failure mode this whole route introduces, and it is invisible from a label.
+        "transport_file": rt.seat_transport_file,
         "state_root_source": rt.state_root_source,
     }
     root = rt.data_root()

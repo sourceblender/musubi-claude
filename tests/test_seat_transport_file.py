@@ -248,7 +248,11 @@ def test_session_start_points_at_the_file_when_that_is_where_the_token_came_from
     module = load(monkeypatch, tmp_path, None)  # no launcher token: the file is the only source
     warning = module.token_warning() or ""
     assert module.seat_transport_source == "seat_env_file"
-    assert "musubi-mcp-<actor>.env" in warning and "cc-start" not in warning
+    # The path, not the <actor> pattern: which file a process reads depends on
+    # MUSUBI_ACTOR, MUSUBI_SEAT_ENV_FILE and HOME, so the pattern is not actionable.
+    expected = str(tmp_path / "home" / ".musubi" / "musubi-mcp-aoi.env")
+    assert module.seat_transport_file == expected
+    assert expected in warning and "cc-start" not in warning
 
 
 @pytest.mark.parametrize(

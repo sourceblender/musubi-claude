@@ -281,8 +281,12 @@ def bind_identity(session_id: str) -> None:
         return
     try:
         config = runtime_config()
+        # binding.fixed_root(), not data_root(): the harness resolves data_root from
+        # PLUGIN_DATA, which lives in the same project env block as MUSUBI_ACTOR and is
+        # re-read mid-turn the same way. Co-flip both and Stop would look in the new
+        # folder, find nothing, and treat "absent" as "proceed".
         binding.write(
-            data_root(),
+            binding.fixed_root(),
             binding.Binding(
                 session_id=session_id,
                 actor=config.actor,
@@ -292,7 +296,7 @@ def bind_identity(session_id: str) -> None:
                 at=time.time(),
             ),
         )
-        binding.prune(data_root())
+        binding.prune(binding.fixed_root())
     except (RuntimeConfigError, OSError, ValueError) as exc:
         log(f"binding_failed:{type(exc).__name__}", time.monotonic())
 

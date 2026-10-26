@@ -28,13 +28,43 @@ import time
 from pathlib import Path
 from typing import Any
 
+# ``musubi_claude_binding`` is imported bare, NOT as ``scripts.musubi_claude_binding``:
+# scripts/ is an implicit namespace package on sys.path (see conftest), so the two
+# spellings load two distinct module objects, and the hooks import bare. A fixture that
+# substitutes fixed_root on the ``scripts.`` copy patches something production never
+# loads — the co-flip test below passed with the guard inert until this was fixed.
+import musubi_claude_binding as binding
 import pytest
 
-from scripts import musubi_claude_binding as binding
 from tests.test_stop_envelope import SESSION, Tx, _load_stop_module
 
 OPTION = "CLAUDE_PLUGIN_OPTION_"
 PROMPT_ID = "p-123"  # Tx.typed's own promptId: the anchor must resolve, or a control proves nothing
+
+# The real resolver, captured before the fixture below substitutes it. Production has
+# no env override on purpose — a knob would re-open the hole the fixed root closes —
+# so a test that wants the genuine article has to hold a reference to it.
+REAL_FIXED_ROOT = binding.fixed_root
+
+
+@pytest.fixture(autouse=True)
+def binding_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Put the binding under tmp_path, substituting the function rather than an env var.
+
+    Deliberately NOT ``tmp_path / "plugin-data"``: the whole point of the fixed root is
+    that it does not move when PLUGIN_DATA does, and a test root living inside the
+    plugin data directory would make the co-flip test below pass for the wrong reason.
+    """
+    root = tmp_path / "binding-root"
+    monkeypatch.setattr(binding, "fixed_root", lambda: root)
+    return root
+
+
+def test_the_hooks_and_this_file_hold_the_same_binding_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Guards the import above: if these ever diverge again, every substitution in this
+    # file silently stops reaching the code under test.
+    stop = load_stop(monkeypatch, tmp_path, "yua")
+    assert stop.binding is binding
 
 
 def load_stop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, actor: str, **env: str) -> Any:
@@ -61,7 +91,7 @@ def load_stop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, actor: str, **env
 def bind_as(tmp_path: Path, actor: str, *, transport: str = "seat_env_file", age: float = 0.0) -> None:
     """What the UserPromptSubmit hook writes when the turn begins."""
     binding.write(
-        tmp_path / "plugin-data",
+        binding.fixed_root(),
         binding.Binding(
             session_id=SESSION,
             actor=actor,
@@ -101,8 +131,10 @@ def run_stop(stop: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list
     return calls
 
 
-def degraded(tmp_path: Path) -> list[str]:
-    path = tmp_path / "plugin-data" / "degraded.jsonl"
+def degraded(tmp_path: Path, root: Path | None = None) -> list[str]:
+    # root is the plugin DATA directory, which a test may have moved; the binding's own
+    # root is somewhere else entirely, which is the property under test.
+    path = (root or tmp_path / "plugin-data") / "degraded.jsonl"
     if not path.is_file():
         return []
     return [json.loads(line).get("reason", "") for line in path.read_text().splitlines() if line.strip()]
@@ -182,7 +214,7 @@ def test_an_earlier_pending_candidate_is_not_declined_by_a_newer_binding(tmp_pat
 
 def test_the_binding_holds_no_content_and_no_credential(tmp_path: Path) -> None:
     bind_as(tmp_path, "yua")
-    path = binding.binding_path(tmp_path / "plugin-data", SESSION)
+    path = binding.binding_path(binding.fixed_root(), SESSION)
     row = json.loads(path.read_text())
     assert set(row) == {"session_id", "actor", "presence", "zone", "transport_source", "at"}
     assert path.stat().st_mode & 0o077 == 0  # owner-only, like the outbox beside it
@@ -190,11 +222,11 @@ def test_the_binding_holds_no_content_and_no_credential(tmp_path: Path) -> None:
 
 def test_a_binding_for_another_session_is_not_read(tmp_path: Path) -> None:
     bind_as(tmp_path, "yua")
-    assert binding.read(tmp_path / "plugin-data", "some-other-session") is None
+    assert binding.read(binding.fixed_root(), "some-other-session") is None
 
 
 def test_expired_bindings_are_pruned(tmp_path: Path) -> None:
-    root = tmp_path / "plugin-data"
+    root = binding.fixed_root()
     bind_as(tmp_path, "yua", age=binding.MAX_AGE_SECONDS + 60)
     stale = binding.binding_path(root, SESSION)
     import os
@@ -203,3 +235,54 @@ def test_expired_bindings_are_pruned(tmp_path: Path) -> None:
     os.utime(stale, (old, old))
     assert binding.prune(root) == 1
     assert not stale.exists()
+
+
+def test_moving_the_data_directory_with_the_actor_does_not_evade_the_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Aoi's co-flip, the fourth control: flip MUSUBI_ACTOR *and* PLUGIN_DATA together.
+
+    The first version of this guard kept the binding under ``data_root()``, which the
+    harness resolves from ``PLUGIN_DATA`` — the same project ``env`` block, re-read
+    mid-turn the same way. She probed it with these helpers: bound Yua, Stop as Tama
+    with PLUGIN_DATA pointing elsewhere, and the capture enqueued into
+    ``elsewhere/tama/home/shadow.db`` because Stop looked in the new folder, found
+    nothing, and "absent means proceed" let it through. The outbox is under the new
+    root too, so the drain would deliver it with Tama's file token.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    bind_as(tmp_path, "yua")
+    stop = load_stop(monkeypatch, tmp_path, "tama", CLAUDE_PLUGIN_DATA=str(elsewhere))
+    calls = run_stop(stop, monkeypatch, tmp_path)
+    assert subcommands(calls) == set(), "the moved data directory must not buy a capture"
+    assert binding.IDENTITY_CHANGED in degraded(tmp_path, elsewhere)
+    assert not list(elsewhere.rglob("pending/*.json"))
+    assert not list(elsewhere.rglob("*.db"))
+
+
+def test_the_co_flip_control_still_captures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Its own no-edit control: moving PLUGIN_DATA alone, with the actor untouched, is
+    # not an attack and must still capture — otherwise the test above would pass on a
+    # plugin that simply declines whenever the data directory is unfamiliar.
+    elsewhere = tmp_path / "elsewhere"
+    bind_as(tmp_path, "yua")
+    stop = load_stop(monkeypatch, tmp_path, "yua", CLAUDE_PLUGIN_DATA=str(elsewhere))
+    calls = run_stop(stop, monkeypatch, tmp_path)
+    assert "enqueue" in subcommands(calls)
+    assert binding.IDENTITY_CHANGED not in degraded(tmp_path, elsewhere)
+
+
+def test_the_fixed_root_is_not_reachable_from_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Every variable a project's env block could use to redirect it, at once.
+    before = REAL_FIXED_ROOT()
+    for key in ("HOME", "CLAUDE_PLUGIN_DATA", "PLUGIN_DATA", "XDG_STATE_HOME", "MUSUBI_ACTOR"):
+        monkeypatch.setenv(key, str(tmp_path / "attacker"))
+    assert REAL_FIXED_ROOT() == before
+    assert str(tmp_path) not in str(before)
+
+
+def test_the_fixed_root_is_the_os_user_home(tmp_path: Path) -> None:
+    # Stated so a later refactor to Path.home() (which reads $HOME) fails here.
+    import os
+    import pwd
+
+    expected = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state" / "musubi-claude"
+    assert REAL_FIXED_ROOT() == expected

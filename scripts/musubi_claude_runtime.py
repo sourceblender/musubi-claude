@@ -75,6 +75,10 @@ _SEAT_OWNED_OPTIONS = ("ACTOR", "SEAT", "ZONE", "DELIVERY_MODE", "MUSUBI_URL", "
 # Where this process's transport came from, for health. Set by
 # apply_seat_environment; see musubi_claude_seat_env for the labels.
 seat_transport_source = "none"
+# The seat file this process would read, named whether or not it supplied anything,
+# so health and SessionStart can point at the object instead of a <actor> pattern.
+# Empty when no seat file is in play at all (no actor, or an actor that names none).
+seat_transport_file = ""
 
 
 def apply_seat_environment(env: MutableMapping[str, str]) -> bool:
@@ -94,11 +98,13 @@ def apply_seat_environment(env: MutableMapping[str, str]) -> bool:
 
     Returns True when the seat owns its identity.
     """
-    global seat_transport_source
+    global seat_transport_source, seat_transport_file
     if not env.get("MUSUBI_ACTOR", "").strip():
         return False
     for key in _SEAT_OWNED_OPTIONS:
         env.pop(_OPTION + key, None)
+    candidate = seat_transport_path(env)
+    seat_transport_file = "" if candidate is None else str(candidate)
     seat_transport_source = apply_seat_transport_file(env)
     venv_bin = Path(sys.executable).parent
     harness = venv_bin / "musubi-harness"
@@ -218,6 +224,7 @@ __all__ = [
     "apply_seat_transport_file",
     "read_seat_transport",
     "seat_transport_path",
+    "seat_transport_file",
     "seat_transport_source",
     "settings_source",
     "resolve_state_root",

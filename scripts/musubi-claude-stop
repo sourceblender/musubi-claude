@@ -392,7 +392,7 @@ def _binding_check(candidate: Candidate, configured: RuntimeConfig) -> tuple[str
     and _seat_root puts it under that actor, where a drain as anyone else cannot
     reach it.
     """
-    bound = binding.read(_data_root(), candidate.session_id)
+    bound = binding.read(binding.fixed_root(), candidate.session_id)
     if bound is None:
         return None, None
     return binding.mismatch(bound, configured.actor, configured.presence, configured.zone, seat_transport_source)
