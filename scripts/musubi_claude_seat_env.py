@@ -94,6 +94,11 @@ def read_seat_transport(path: Path) -> tuple[dict[str, str], str]:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        else:
+            # Unquoted: an inline comment ends the value, so `TOKEN=abc # note` does
+            # not carry " # note" into the credential. Only after whitespace, so a '#'
+            # inside a value (a URL fragment) survives.
+            value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
         if value:
             found[key.strip()] = value
     return found, "read" if found else "no_keys"

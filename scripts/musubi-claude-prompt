@@ -36,7 +36,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from musubi_claude_runtime import data_root, runtime, runtime_config, tool_environment
+import musubi_claude_binding as binding
+from musubi_claude_runtime import (
+    RuntimeConfigError,
+    data_root,
+    runtime,
+    runtime_config,
+    seat_transport_source,
+    tool_environment,
+)
 from musubi_harness.core import SECRET_RE
 from musubi_harness.plugin_mcp import PluginMcpFacade
 
@@ -254,6 +262,41 @@ def save_seen(session_id: str, seen: set[str]) -> None:
     path.write_text(json.dumps(sorted(seen)[-500:]), encoding="utf-8")
 
 
+def bind_identity(session_id: str) -> None:
+    """Write down the identity this prompt was submitted under, before anything else.
+
+    Claude Code re-reads the project's settings ``env`` block mid-turn, so the Stop
+    that captures this turn can resolve a DIFFERENT actor than the one that prompted
+    it (see musubi_claude_binding). Stop compares against this row and declines the
+    capture by name on a mismatch.
+
+    Called before every early return in main(), because recall being off, skipped or
+    unreachable has nothing to do with whether this turn gets captured — a
+    shadow-mode seat is exactly the one whose captures must still be attributed
+    correctly. Failure here is recorded and never raised: a hook that cannot write
+    its binding must not block the prompt, and an absent binding is read as
+    "nothing to compare", which is the pre-binding behaviour.
+    """
+    if not session_id:
+        return
+    try:
+        config = runtime_config()
+        binding.write(
+            data_root(),
+            binding.Binding(
+                session_id=session_id,
+                actor=config.actor,
+                presence=config.presence,
+                zone=config.zone,
+                transport_source=seat_transport_source,
+                at=time.time(),
+            ),
+        )
+        binding.prune(data_root())
+    except (RuntimeConfigError, OSError, ValueError) as exc:
+        log(f"binding_failed:{type(exc).__name__}", time.monotonic())
+
+
 def log(decision: str, started: float, object_ids: list[str] | None = None) -> None:
     """One line per prompt: the decision, never the prompt text."""
     record = {
@@ -281,6 +324,8 @@ def main() -> int:
         hook = json.load(sys.stdin)
         prompt = hook.get("prompt") if isinstance(hook, dict) else None
         session_id = str(hook.get("session_id") or "") if isinstance(hook, dict) else ""
+        # First, and unconditionally: capture attribution does not depend on recall.
+        bind_identity(session_id)
         if not isinstance(prompt, str):
             log("skipped:no_prompt", started)
             return 0

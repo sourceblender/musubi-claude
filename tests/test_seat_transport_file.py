@@ -251,5 +251,34 @@ def test_session_start_points_at_the_file_when_that_is_where_the_token_came_from
     assert "musubi-mcp-<actor>.env" in warning and "cc-start" not in warning
 
 
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("MUSUBI_TOKEN=abc # note", "abc"),  # an inline comment is not part of the credential
+        ("MUSUBI_TOKEN=abc\t# note", "abc"),
+        ('MUSUBI_TOKEN="abc # note"', "abc # note"),  # quoted: the value is what was quoted
+        ("MUSUBI_API_URL=https://x/#frag", "https://x/#frag"),  # no space, so not a comment
+    ],
+)
+def test_an_inline_comment_ends_an_unquoted_value(line: str, expected: str, tmp_path: Path) -> None:
+    path = write_seat_file(tmp_path, "shiori", line + "\n")
+    values, _ = read_seat_transport(path)
+    assert list(values.values()) == [expected]
+
+
+def test_the_mode_check_is_on_the_symlink_target(tmp_path: Path) -> None:
+    # stat() follows symlinks, so a link to a 0600 file loads and a link to a 0644 one
+    # is refused. That is the behaviour we want — the credential's own mode decides —
+    # and it is asserted so it stays deliberate rather than incidental.
+    real = tmp_path / "real.env"
+    real.write_text(f"MUSUBI_TOKEN={FILE_TOKEN}\n")
+    real.chmod(0o600)
+    link = tmp_path / "link.env"
+    link.symlink_to(real)
+    assert read_seat_transport(link) == ({"MUSUBI_TOKEN": FILE_TOKEN}, "read")
+    real.chmod(0o644)
+    assert read_seat_transport(link) == ({}, "refused_mode")
+
+
 def test_a_directory_is_not_a_credential_file(tmp_path: Path) -> None:
     assert read_seat_transport(tmp_path) == ({}, "not_a_file")

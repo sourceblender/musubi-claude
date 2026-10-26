@@ -132,6 +132,16 @@ and only when the launcher did not already set them — an export always wins.
 The file must not be readable by group or others (`chmod 600`); a looser one is
 refused, and `/musubi-claude:health` reports `transport_source` either way.
 
+**The identity a turn is captured under is the identity it was prompted under.**
+Claude Code re-reads the project's `settings.json` `env` block while a turn is
+running, and each hook process gets the value current at its own spawn — so
+`MUSUBI_ACTOR` can differ between the `UserPromptSubmit` that began a turn and
+the `Stop` that captures it. `UserPromptSubmit` therefore writes the prompting
+actor, presence and zone to `<state root>/prompt-identity/`, and `Stop` compares
+before the capture becomes durable. On a mismatch the turn is declined with
+`identity_changed_mid_turn` in `degraded.jsonl` rather than attributed to either
+seat. A missing binding (the hook never ran) captures as it always did.
+
 **Legacy sources**, used only when **Musubi actor** is empty: the
 `MUSUBI_ACTOR` / `MUSUBI_PRESENCE` / `MUSUBI_ZONE` / `MUSUBI_DELIVERY_MODE`
 environment variables, or a `config.json` in the plugin data directory:
