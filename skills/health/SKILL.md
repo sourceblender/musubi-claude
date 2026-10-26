@@ -19,6 +19,9 @@ Explain the report above to the user in a short, plain summary. Rules:
 - Lead with one verdict line: **working**, **working with problems**, or
   **not working**, and why.
 - `setup: false` → not set up; tell them to run `/musubi-claude:setup`.
+- `error: plugin_data_unknown` → the report could not find the plugin's data
+  directory, so it says nothing about setup. Do not suggest setup; quote the
+  `fix`.
 - `identity.ok: false` → quote the error code; point to `/config` →
   musubi-claude (**Musubi actor**, **Seat**, **Zone**).
 - Delivery: `delivery_mode: shadow` means nothing has left this machine, by

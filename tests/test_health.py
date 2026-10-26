@@ -162,6 +162,27 @@ def test_empty_plugin_data_is_reported_not_guessed(tmp_path: Path) -> None:
     assert json.loads(done.stdout)["error"] == "plugin_data_unknown"
 
 
+def test_unset_plugin_data_is_reported_not_called_a_missing_setup(tmp_path: Path) -> None:
+    # The Bash tool never receives CLAUDE_PLUGIN_DATA, so a bare shell call used to
+    # fall through to the legacy root, find no venv there, and report a working
+    # install as harness_unavailable with "run setup" as the fix.
+    (tmp_path / ".local" / "state" / "musubi-claude").mkdir(parents=True)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+    done = subprocess.run(
+        ["sh", str(ROOT / "bin" / "musubi-claude-health")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert done.returncode == 0
+    report = json.loads(done.stdout)
+    assert report["error"] == "plugin_data_unknown"
+    assert "setup" not in report
+    assert "--plugin-data" in report["fix"]
+    assert not (tmp_path / ".local" / "state" / "musubi-claude" / "degraded.jsonl").exists()
+
+
 def test_setup_refuses_without_a_plugin_data_dir(tmp_path: Path) -> None:
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
     for args in (["--plugin-data", ""], []):

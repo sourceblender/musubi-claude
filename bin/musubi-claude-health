@@ -13,4 +13,11 @@ if [ "${1:-}" = "--plugin-data" ]; then
   fi
   CLAUDE_PLUGIN_DATA="$2"; export CLAUDE_PLUGIN_DATA; shift 2
 fi
+# Unset is the same unknown as empty, and the common case: a bare call from the
+# Bash tool. Falling through would read the legacy root, find no venv there, and
+# tell a working install to run setup.
+if [ -z "${CLAUDE_PLUGIN_DATA:-}" ]; then
+  printf '%s\n' '{"error": "plugin_data_unknown", "detail": "CLAUDE_PLUGIN_DATA is not set, so the plugin environment cannot be found; this says nothing about setup", "fix": "run /musubi-claude:health from Claude Code, or pass --plugin-data <dir>"}'
+  exit 0
+fi
 exec "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/scripts/musubi-claude-run" health "$@"
