@@ -113,6 +113,25 @@ The plugin passes the URL and token to the harness as `MUSUBI_API_URL` /
 them. With musubi-harness 1.1.0 or later, that is all a remote install needs:
 the harness's bundled HTTP client talks to Musubi directly.
 
+**A seat's own transport file.** A process that sets `MUSUBI_ACTOR` owns its
+identity *and* its transport: the per-user settings above are never consulted
+for it, because on a machine where several seats share one OS user they would
+all run with whoever last saved `/config`. Such a seat normally gets
+`MUSUBI_API_URL` and `MUSUBI_TOKEN` from its launcher — but a host that starts
+Claude Code without one (the desktop app, cron, launchd) then has an identity
+and no transport at all. So the seat may instead keep them in
+`~/.musubi/musubi-mcp-<actor>.env`, or wherever `MUSUBI_SEAT_ENV_FILE` points:
+
+```sh
+MUSUBI_API_URL=https://musubi.example.com
+MUSUBI_TOKEN=<the seat's JWT>
+```
+
+Only those two keys are read from it, so the file can never change identity,
+and only when the launcher did not already set them — an export always wins.
+The file must not be readable by group or others (`chmod 600`); a looser one is
+refused, and `/musubi-claude:health` reports `transport_source` either way.
+
 **Legacy sources**, used only when **Musubi actor** is empty: the
 `MUSUBI_ACTOR` / `MUSUBI_PRESENCE` / `MUSUBI_ZONE` / `MUSUBI_DELIVERY_MODE`
 environment variables, or a `config.json` in the plugin data directory:

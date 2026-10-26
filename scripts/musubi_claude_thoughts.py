@@ -57,6 +57,8 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
+from musubi_claude_seat_env import apply_seat_transport_file
+
 READ_TIMEOUT = 75.0  # the server pings every 30 s
 TEXT_CHARS = 300
 BACKOFF = (1, 2, 5, 10, 30, 60)
@@ -285,8 +287,17 @@ def _identity(env: dict[str, str]) -> tuple[str, str, str, str]:
     A seat launcher that sets MUSUBI_ACTOR owns identity AND transport: the
     per-user options are never consulted for it, not even as a fallback, so a
     seat without its own token streams nothing rather than someone else's.
+
+    A seat's transport may equally come from its own credential file, exactly as
+    the runtime resolves it for every other hook. This binding deliberately does
+    not import the runtime (that would run its import-time identity mapping), so
+    it calls the same side-effect-free helper on its own copy of the env. Without
+    this, a seat whose token comes from the file would stream nothing while every
+    other hook worked — a half-fix that reads as "thoughts are off for me".
     """
     if _seat_owned(env):
+        env = dict(env)  # resolving transport must not mutate the caller's mapping
+        apply_seat_transport_file(env)
         return (
             env.get("MUSUBI_API_URL", "").strip(),
             env.get("MUSUBI_TOKEN", "").strip(),

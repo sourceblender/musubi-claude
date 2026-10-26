@@ -44,8 +44,16 @@ def venv(tmp_path: Path) -> Path:
 
 
 def resolve(env: dict[str, str], venv: Path, data: Path) -> tuple[str, dict[str, str], str, str]:
-    """Apply settings as the plugin does, then ask the real harness what it resolves."""
+    """Apply settings as the plugin does, then ask the real harness what it resolves.
+
+    HOME is isolated: a seat now also reads ~/.musubi/musubi-mcp-<actor>.env, so
+    with the real home these cases would resolve against whatever credential file
+    the developer happens to have for this actor. (It did: the token case below
+    passed on CI and failed on the machine that has one.) Seat-file behaviour is
+    tested on purpose in tests/test_seat_transport_file.py.
+    """
     data.mkdir(parents=True, exist_ok=True)
+    env = {"HOME": str(data.parent / "isolated-home"), **env}
     (data / "config.json").write_text(
         json.dumps({"harness_bin": "/fleet-tools/bin/musubi-harness", "memory_data_bin": "/fleet-tools/bin/memory-data"})
     )

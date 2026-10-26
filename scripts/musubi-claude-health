@@ -98,6 +98,7 @@ def _undelivered(counts: dict[str, Any]) -> int:
 def report(probe: bool, event_id: str | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {
         "settings_source": rt.settings_source,
+        "transport_source": rt.seat_transport_source,
         "state_root_source": rt.state_root_source,
     }
     root = rt.data_root()

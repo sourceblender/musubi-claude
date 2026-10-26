@@ -12,7 +12,7 @@ import json
 import os
 import subprocess  # re-exported for adapter tests and fault injection
 
-from musubi_claude_runtime import runtime, settings_source
+from musubi_claude_runtime import runtime, seat_transport_source, settings_source
 from musubi_harness.plugin_continuity import MAX_CONTENT, MAX_ROWS, PluginContinuity
 
 try:
@@ -52,7 +52,9 @@ def token_warning() -> str | None:
     # Say where THIS seat's token comes from: since #30 a seat whose launcher sets
     # its identity also gets its token from the launcher, where the plugin
     # settings have no effect (Aoi's review).
-    if settings_source == "environment":
+    if settings_source == "environment" and seat_transport_source.startswith("seat_env_file"):
+        fix = "This seat's token comes from its own ~/.musubi/musubi-mcp-<actor>.env; fix it there."
+    elif settings_source == "environment":
         fix = "This seat's token comes from its launcher (cc-start reads it from 1Password); fix it there."
     else:
         fix = "Enter the right token for this seat in the plugin settings."
