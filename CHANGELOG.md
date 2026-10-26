@@ -5,6 +5,13 @@ All notable changes to `musubi-claude` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/sourceblender/musubi-claude/compare/v0.8.1...v0.9.0) (2026-10-26)
+
+
+### Features
+
+* **transport:** a seat may keep its transport in its own credential file ([#48](https://github.com/sourceblender/musubi-claude/issues/48)) ([80fb6d8](https://github.com/sourceblender/musubi-claude/commit/80fb6d87758cbe80235a8a283c072e1521f914f8))
+
 ## [0.8.1](https://github.com/sourceblender/musubi-claude/compare/v0.8.0...v0.8.1) (2026-10-23)
 
 
