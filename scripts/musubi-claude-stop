@@ -45,6 +45,7 @@ from musubi_claude_exchange import (
 )
 import musubi_claude_binding as binding
 from musubi_claude_pending import Candidate, expired, load, load_all, remove, save
+import musubi_claude_timeline as timeline
 from musubi_claude_runtime import (
     RuntimeConfig,
     RuntimeConfigError,
@@ -133,6 +134,9 @@ def _hook_str(hook: dict[str, Any], *names: str, error: str, conflict: str | Non
     return found[0]
 
 
+_timeline = timeline.Timeline()
+
+
 def _data_root() -> Path:
     return data_root()
 
@@ -185,11 +189,15 @@ def candidate_from_hook(hook: dict[str, Any]) -> Candidate:
 
 
 def _load_records(transcript_path: str) -> list[dict[str, Any]]:
+    started = time.monotonic()
     try:
-        lines = Path(transcript_path).read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise AdapterError("transcript_unreadable") from exc
-    return iter_dicts(_records(lines))
+        try:
+            lines = Path(transcript_path).read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise AdapterError("transcript_unreadable") from exc
+        return iter_dicts(_records(lines))
+    finally:
+        _timeline.note_load(time.monotonic() - started)
 
 
 def envelope_for(candidate: Candidate) -> dict[str, Any]:
@@ -342,6 +350,14 @@ def _degraded_scope(hook: Any) -> dict[str, str]:
     return scope
 
 
+def _write_timeline(hook: Any) -> None:
+    try:
+        scope = _degraded_scope(hook)
+        _timeline.write(_data_root(), scope.get("seat"), scope.get("session_id"))
+    except Exception:  # noqa: BLE001 — same rule as _degraded_scope: a diagnostic must not fail the hook
+        pass
+
+
 def _record_degraded(reason: str, scope: dict[str, str] | None = None) -> None:
     root = _data_root()
     try:
@@ -447,15 +463,22 @@ def _drain_remote(envelope: dict[str, Any], configured: RuntimeConfig, hook: Any
     Musubi, so only this gets the credentials."""
     for command, timeout, remote in delivery_commands(envelope, configured)[1:]:
         env = tool_environment(configured) if remote else local_tool_environment(configured)
-        result = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False, env=env)
-        fallback = without_batch_flags(command) if result.returncode == 2 else None
-        if fallback is not None and "unrecognized arguments" in (result.stderr or ""):
-            # An older harness binary: deliver one row, as it always did.
-            result = subprocess.run(fallback, text=True, capture_output=True, timeout=timeout, check=False, env=env)
+        _timeline.enter_pass()
+        try:
+            result = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False, env=env)
+            fallback = without_batch_flags(command) if result.returncode == 2 else None
+            if fallback is not None and "unrecognized arguments" in (result.stderr or ""):
+                # An older harness binary: deliver one row, as it always did.
+                result = subprocess.run(fallback, text=True, capture_output=True, timeout=timeout, check=False, env=env)
+        except subprocess.TimeoutExpired:
+            _timeline.note_timeout()
+            raise
         if result.returncode != 0:
             # Same invariant as the enqueue path: exit code is diagnosis, output is content.
+            _timeline.note_failure(result.stdout, result.stderr)
             raise AdapterError(f"verified_delivery_failed:exit={result.returncode}")
         if remote:
+            _timeline.note_drain(result.stdout)
             stalled = stalled_reason(result.stdout)
             if stalled:
                 # rc=0 with no progress used to be silent: a token without write
@@ -487,13 +510,16 @@ def _process(path: Path, candidate: Candidate, configured: RuntimeConfig, scope:
         # transcript_unreadable, identity config: may clear on its own. Say so, keep it.
         _record_degraded(f"pending_retry:{exc}", scope)
         return RETRY, None
+    started = time.monotonic()
     try:
         _enqueue(envelope, configured)
         _stage(envelope, configured)
     except (AdapterError, OSError, subprocess.SubprocessError) as exc:
+        _timeline.note_stage(time.monotonic() - started)
         reason = str(exc) if isinstance(exc, AdapterError) else "adapter_runtime_failed"
         _record_degraded(f"pending_retry:{reason}", scope)
         return RETRY, None
+    _timeline.note_stage(time.monotonic() - started)
     remove(path)
     return RESOLVED, envelope
 
@@ -534,26 +560,32 @@ def drain(
     older = [(p, c) for p, c in readable if c.key != current_key]
     current = [(p, c) for p, c in readable if c.key == current_key]
     started = time.monotonic() if started is None else started
+    _timeline.pending, _timeline.older = len(entries), len(older)
     for index, (path, candidate) in enumerate(older):
         limit = DRAIN_BUDGET_SECONDS if budget is None else budget
         if index >= DRAIN_MAX_OLDER or time.monotonic() - started > limit:
             break
         scope = {**_degraded_scope(hook), "session_id": candidate.session_id}
+        _timeline.older_started += 1
         outcome, envelope = _process(path, candidate, configured, scope)
+        _timeline.note_outcome(outcome)
         if outcome == RESOLVED and envelope is not None:
             captured.append(envelope)
         elif outcome in (RETRY, NOT_YET_OUTCOME):
             _retry(path, candidate, configured, scope, not_yet=outcome == NOT_YET_OUTCOME)
     for path, candidate in current:
         if time.monotonic() - started > CURRENT_START_LIMIT_SECONDS:
+            _timeline.current_skipped = True
             break  # saved already; the next hook resolves it
         scope = {**_degraded_scope(hook), "session_id": candidate.session_id}
         for attempt in range(POLL_ATTEMPTS):
+            _timeline.current_polls += 1
             outcome, envelope = _process(path, candidate, configured, scope)
             if outcome != NOT_YET_OUTCOME:
                 break
             if attempt + 1 < POLL_ATTEMPTS:
                 time.sleep(POLL_INTERVAL_SECONDS)
+        _timeline.note_outcome(outcome)
         if outcome == RESOLVED and envelope is not None:
             captured.append(envelope)
         elif outcome in (RETRY, NOT_YET_OUTCOME):
@@ -567,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
     # but leave the network pass to the next Stop, which has the budget for it.
     drain_only = "--drain-only" in args
     started = time.monotonic()
+    _timeline.begin(started, drain_only=drain_only)
     hook: Any = None
     try:
         raw = sys.stdin.read()
@@ -611,9 +644,13 @@ def main(argv: list[str] | None = None) -> int:
             started=started,
             budget=DRAIN_ONLY_BUDGET_SECONDS if drain_only else None,
         )
-        if captured and not drain_only and time.monotonic() - started <= REMOTE_START_LIMIT_SECONDS:
-            _drain_remote(captured[-1], configured, hook)
+        if _timeline.note_gate(time.monotonic() - started, REMOTE_START_LIMIT_SECONDS, captured=bool(captured)):
+            try:
+                _drain_remote(captured[-1], configured, hook)
+            finally:
+                _timeline.leave_pass()
     except (AdapterError, json.JSONDecodeError, OSError, subprocess.SubprocessError, RuntimeConfigError) as exc:
+        _timeline.exit = timeline.EXIT_HANDLED_FAILURE
         reason = str(exc) if isinstance(exc, (AdapterError, RuntimeConfigError)) else "adapter_runtime_failed"
         _record_degraded(reason, _degraded_scope(hook))
     except Exception as exc:  # noqa: BLE001 — deliberate backstop, see below
@@ -628,7 +665,9 @@ def main(argv: list[str] | None = None) -> int:
         # NOT BaseException: KeyboardInterrupt and SystemExit propagate, because a session
         # being interrupted or torn down is not a degraded capture and must not be recorded
         # as one. MemoryError DOES inherit Exception and IS caught here.
+        _timeline.exit = timeline.EXIT_UNEXPECTED_FAILURE
         _record_degraded(f"adapter_unexpected_error:{type(exc).__name__}", _degraded_scope(hook))
+    _write_timeline(hook)
     print("{}")  # Stop hooks emit JSON; empty object = no directive, never blocks the turn
     return 0
 
