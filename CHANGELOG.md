@@ -5,6 +5,18 @@ All notable changes to `musubi-claude` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/sourceblender/musubi-claude/compare/v0.9.0...v0.10.0) (2026-10-31)
+
+
+### Features
+
+* **stop:** one metadata-only timeline line per Stop ([#53](https://github.com/sourceblender/musubi-claude/issues/53)) ([efc68d9](https://github.com/sourceblender/musubi-claude/commit/efc68d9bdfcac52a0f3c23cc50d82be5cdf624e5))
+
+
+### Bug Fixes
+
+* **health:** an unset plugin data dir is unknown, not a missing setup ([#50](https://github.com/sourceblender/musubi-claude/issues/50)) ([3d8ee40](https://github.com/sourceblender/musubi-claude/commit/3d8ee405fb2ca16eb6e746f8217b6baf2af5734d))
+
 ## [0.9.0](https://github.com/sourceblender/musubi-claude/compare/v0.8.1...v0.9.0) (2026-10-26)
 
 
