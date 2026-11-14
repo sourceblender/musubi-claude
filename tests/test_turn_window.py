@@ -87,18 +87,17 @@ def _parse(lines: list[str]) -> list[dict[str, Any]]:
     return iter_dicts(json.loads(line) for line in lines if line.strip())
 
 
-def _whole(path: Path) -> Any:
-    return _parse(path.read_text(encoding="utf-8").splitlines()), frozenset()
+def _whole(path: Path) -> list[dict[str, Any]]:
+    return _parse(path.read_text(encoding="utf-8").splitlines())
 
 
-def _windowed(path: Path, prompt: str) -> Any:
+def _windowed(path: Path, prompt: str) -> list[dict[str, Any]]:
     return load_turn(str(path), prompt, _parse)
 
 
-def _resolve(loaded: Any, prompt: str, text: str) -> Any:
-    records, preceded = loaded
+def _resolve(records: list[dict[str, Any]], prompt: str, text: str) -> Any:
     try:
-        return exchange_for(records, resolve_anchor(records, prompt, text, preceded), preceded)
+        return exchange_for(records, resolve_anchor(records, prompt, text))
     except ExchangeError as exc:
         return f"declined:{exc}"
 
@@ -106,7 +105,6 @@ def _resolve(loaded: Any, prompt: str, text: str) -> Any:
 @pytest.fixture(autouse=True)
 def _fresh_cache() -> None:
     window._first_seen.clear()
-    window._named_seen.clear()
 
 
 def test_window_gives_the_same_exchange_as_the_whole_file(tmp_path: Path) -> None:
@@ -124,11 +122,10 @@ def test_window_is_the_turn_not_the_file(tmp_path: Path) -> None:
     for n in range(3000):
         tx.turn(n, pad=4000)
     path = tx.write()
-    records, preceded = _windowed(path, "prompt-02999")
+    records = _windowed(path, "prompt-02999")
     # 6000 records in the file; the last turn and the answer before it are what is needed.
     assert len(records) < 200
     assert records[-1]["message"]["id"] == "msg_02999"
-    assert preceded == frozenset()
 
 
 def test_finding_the_window_does_not_hold_the_file_in_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,9 +184,9 @@ def test_a_prompt_the_file_never_names_reads_a_small_tail(tmp_path: Path) -> Non
     for n in range(500):
         tx.turn(n, pad=4000)
     path = tx.write()
-    loaded = _windowed(path, "prompt-absent")
-    assert len(loaded[0]) < len(tx.records) / 4
-    assert _resolve(loaded, "prompt-absent", "x") == "declined:answer_not_in_transcript"
+    records = _windowed(path, "prompt-absent")
+    assert len(records) < len(tx.records) / 4
+    assert _resolve(records, "prompt-absent", "x") == "declined:answer_not_in_transcript"
 
 
 def test_two_answers_for_one_prompt_are_still_ambiguous(tmp_path: Path) -> None:
@@ -212,7 +209,7 @@ def test_an_id_that_json_could_escape_reads_the_whole_file(tmp_path: Path) -> No
     tx.answer("msg_odd", "odd answer")
     path = tx.write()
     assert not window.searchable('prompt "quoted"')
-    assert len(_windowed(path, 'prompt "quoted"')[0]) == len(tx.records)
+    assert len(_windowed(path, 'prompt "quoted"')) == len(tx.records)
 
 
 def test_the_id_quoted_in_earlier_text_only_widens_the_window(tmp_path: Path) -> None:
@@ -233,7 +230,7 @@ def test_a_file_that_grows_between_polls_is_scanned_only_where_it_grew(tmp_path:
         tx.turn(n, pad=2000)
     path = tx.write()
     assert _resolve(_windowed(path, "prompt-late"), "prompt-late", "late") == "declined:answer_not_in_transcript"
-    assert window._first_seen[(str(path), b"prompt-late")] == (None, path.stat().st_size)
+    assert window._first_seen[(str(path), b"prompt-late")][1:] == (None, path.stat().st_size)
     tx.user("prompt-late", "arrived")
     tx.answer("msg_late", "late")
     tx.write()
@@ -247,7 +244,7 @@ def test_a_missing_transcript_raises_oserror(tmp_path: Path) -> None:
         load_turn(str(tmp_path / "gone.jsonl"), "prompt-1", _parse)
 
 
-# --- A terminal answer counts once, at its first terminal line (Yua's hold on #54) -----
+# --- The exchange logic reads a message across ALL its lines (Yua's two holds on #54) ---
 
 
 def _ids(result: Any) -> Any:
@@ -257,28 +254,29 @@ def _ids(result: Any) -> Any:
     return (result.answer_id, tuple(item.record_id for item in result.inputs), result.trigger)
 
 
-def test_a_copy_of_an_old_terminal_line_is_not_the_previous_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Old terminal A, then enough to push A before the window, a normal previous turn
-    B, the target's input, an exact copy of A's line, then the target's answer. The
-    whole file dedupes A, so the span starts after B and captures the input."""
-    monkeypatch.setattr(window, "FIRST_BACKSTEP_BYTES", 512)
-    tx = Tx(tmp_path / "t.jsonl")
-    tx.user("prompt-old", "an old question")
-    tx.answer("msg_A", "an old answer")
-    old_terminal = dict(tx.records[-1])
+def _far_back(tx: Tx) -> None:
     for n in range(50):
         tx.turn(n, pad=400)
-    tx.user("prompt-B", "the previous question")
+
+
+def test_a_copy_of_an_old_terminal_line_is_not_the_previous_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old terminal A, then enough to push A out of the first window, a normal previous
+    turn B, the target's input, an exact copy of A's line, then the target's answer. The
+    whole file counts A once, at its first line, so the span starts after B."""
+    monkeypatch.setattr(window, "FIRST_BACKSTEP_BYTES", 512)
+    tx = Tx(tmp_path / "t.jsonl")
+    tx.user("ask-old", "an old question")
+    tx.answer("msg_A", "an old answer")
+    old_terminal = dict(tx.records[-1])
+    _far_back(tx)
+    tx.user("ask-B", "the previous question")
     tx.answer("msg_B", "the previous answer")
-    captured = tx.user("prompt-target", "the question that must be captured")
+    captured = tx.user("ask-target", "the question that must be captured")
     tx.records.append(old_terminal)  # the exact duplicate, mid-turn
     tx.answer("msg_target", "the target answer")
     path = tx.write()
-    whole = _resolve(_whole(path), "prompt-target", "the target answer")
-    windowed_load = _windowed(path, "prompt-target")
-    windowed = _resolve(windowed_load, "prompt-target", "the target answer")
-    assert len(windowed_load[0]) < 20, "the case must put A before the window"
-    assert "msg_A" in windowed_load[1]
+    whole = _resolve(_whole(path), "ask-target", "the target answer")
+    windowed = _resolve(_windowed(path, "ask-target"), "ask-target", "the target answer")
     assert not isinstance(whole, str)
     assert _ids(windowed) == _ids(whole)
     assert captured in _ids(whole)[1]
@@ -286,71 +284,99 @@ def test_a_copy_of_an_old_terminal_line_is_not_the_previous_answer(tmp_path: Pat
 
 def test_a_reparented_copy_of_an_old_answer_is_not_a_second_answer_for_the_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A copy of an old terminal line whose parent now sits in the target's turn would
-    resolve to the target's prompt inside the window. The whole file never counts it."""
+    resolve to the target's prompt in a window that ended there. The file never counts it."""
     monkeypatch.setattr(window, "FIRST_BACKSTEP_BYTES", 512)
     tx = Tx(tmp_path / "t.jsonl")
-    tx.user("prompt-old", "an old question")
+    tx.user("ask-old", "an old question")
     tx.answer("msg_A", "an old answer")
     old_terminal = dict(tx.records[-1])
-    for n in range(50):
-        tx.turn(n, pad=400)
-    asked = tx.user("prompt-target", "the question")
+    _far_back(tx)
+    asked = tx.user("ask-target", "the question")
     tx.records.append({**old_terminal, "uuid": "copy-of-A", "parentUuid": asked})
     tx.answer("msg_target", "the target answer")
     path = tx.write()
-    whole = _resolve(_whole(path), "prompt-target", "the target answer")
-    windowed = _resolve(_windowed(path, "prompt-target"), "prompt-target", "the target answer")
+    whole = _resolve(_whole(path), "ask-target", "the target answer")
+    windowed = _resolve(_windowed(path, "ask-target"), "ask-target", "the target answer")
     assert not isinstance(whole, str), whole
     assert _ids(windowed) == _ids(whole)
 
 
 def test_an_answer_whose_id_was_terminal_long_ago_declines_as_the_whole_file_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """If the target's own answer line reuses an id that was terminal before the window,
-    the whole file places that answer at its first line, which is not this prompt's."""
     monkeypatch.setattr(window, "FIRST_BACKSTEP_BYTES", 512)
     tx = Tx(tmp_path / "t.jsonl")
-    tx.user("prompt-old", "an old question")
+    tx.user("ask-old", "an old question")
     tx.answer("msg_reused", "an old answer")
-    for n in range(50):
-        tx.turn(n, pad=400)
-    tx.user("prompt-target", "the question")
+    _far_back(tx)
+    tx.user("ask-target", "the question")
     tx.answer("msg_reused", "an old answer")
     path = tx.write()
-    whole = _resolve(_whole(path), "prompt-target", "an old answer")
-    windowed = _resolve(_windowed(path, "prompt-target"), "prompt-target", "an old answer")
+    whole = _resolve(_whole(path), "ask-target", "an old answer")
     assert isinstance(whole, str)
-    assert windowed == whole
+    assert _resolve(_windowed(path, "ask-target"), "ask-target", "an old answer") == whole
 
 
-def test_an_earlier_line_of_the_same_message_that_is_not_terminal_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A message can span lines; only its terminal line counts. An earlier, non-terminal
-    line of the previous answer before the window must not hide that answer."""
+def test_earlier_text_of_the_answer_is_part_of_the_binding_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Yua's second hold. An old, non-terminal line carries text under the id the target's
+    answer later uses. An answer's text is every text block with its id, so the whole file
+    sees old text plus new and declines the mismatch. A window without the old line would
+    see only the new text and accept a binding the file refuses."""
+    monkeypatch.setattr(window, "FIRST_BACKSTEP_BYTES", 512)
+    tx = Tx(tmp_path / "t.jsonl")
+    tx.user("ask-old", "an old question")
+    tx.answer("msg_M", "text from long ago", stop="tool_use")
+    tx.answer("msg_old_end", "the old turn ends")
+    _far_back(tx)
+    tx.user("ask-B", "the previous question")
+    tx.answer("msg_B", "the previous answer")
+    tx.user("ask-target", "the question")
+    tx.answer("msg_M", "what Stop says")
+    path = tx.write()
+    whole = _resolve(_whole(path), "ask-target", "what Stop says")
+    assert whole == "declined:answer_text_mismatch"
+    assert _resolve(_windowed(path, "ask-target"), "ask-target", "what Stop says") == whole
+
+
+def test_an_earlier_line_of_the_previous_answer_changes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control: a message spans lines and only its terminal line counts as the answer."""
     monkeypatch.setattr(window, "FIRST_BACKSTEP_BYTES", 300)
     tx = Tx(tmp_path / "t.jsonl")
     tx.turn(1)
-    tx.user("prompt-B", "the previous question")
+    tx.user("ask-B", "the previous question")
     tx.answer("msg_B", "thinking " + "t" * 3000, stop="tool_use")
     tx.answer("msg_B", "the previous answer")
-    captured = tx.user("prompt-target", "the question")
+    captured = tx.user("ask-target", "the question")
     tx.answer("msg_target", "the target answer")
     path = tx.write()
-    whole = _resolve(_whole(path), "prompt-target", "the target answer")
-    windowed = _resolve(_windowed(path, "prompt-target"), "prompt-target", "the target answer")
+    whole = _resolve(_whole(path), "ask-target", "the target answer")
+    windowed = _resolve(_windowed(path, "ask-target"), "ask-target", "the target answer")
     assert _ids(windowed) == _ids(whole)
     assert _ids(whole)[1] == (captured,)
 
 
-def test_the_before_window_scan_holds_one_chunk_not_the_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(window, "SCAN_CHUNK_BYTES", 256 * 1024)
+def test_a_message_id_quoted_far_back_only_widens_the_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(window, "FIRST_BACKSTEP_BYTES", 512)
     tx = Tx(tmp_path / "t.jsonl")
-    for n in range(3000):
-        tx.turn(n, pad=8000)
+    tx.user("ask-old", "someone pasted msg_target into a message")
+    tx.answer("msg_old", "noted")
+    _far_back(tx)
+    tx.user("ask-target", "the question")
+    tx.answer("msg_target", "the target answer")
     path = tx.write()
-    size = path.stat().st_size
-    tracemalloc.start()
-    with path.open("rb") as handle:
-        assert window.named_before(str(path), handle, "msg_00007", size, lambda text: "end_turn" in text)
-        assert not window.named_before(str(path), handle, "msg_never", size, lambda text: True)
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    assert peak < size / 8, f"peak {peak} for a {size}-byte file"
+    records = _windowed(path, "ask-target")
+    assert len(records) == len(tx.records), "the quoted id is the first byte that names it"
+    assert _ids(_resolve(records, "ask-target", "the target answer")) == _ids(_resolve(_whole(path), "ask-target", "the target answer"))
+
+
+def test_a_file_replaced_at_the_same_path_is_scanned_afresh(tmp_path: Path) -> None:
+    first = Tx(tmp_path / "t.jsonl")
+    for n in range(30):
+        first.turn(n, pad=2000)
+    path = first.write()
+    assert not isinstance(_resolve(_windowed(path, "prompt-00029"), "prompt-00029", "answer 29"), str)
+    path.unlink()
+    second = Tx(tmp_path / "t.jsonl")
+    second.user("prompt-00029", "a different session reusing the id")
+    second.answer("msg_other", "a different answer")
+    second.write()
+    got = _resolve(_windowed(path, "prompt-00029"), "prompt-00029", "a different answer")
+    assert _ids(got) == _ids(_resolve(_whole(path), "prompt-00029", "a different answer"))
