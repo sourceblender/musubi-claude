@@ -166,13 +166,16 @@ def _is_interrupt_marker(record: dict[str, Any]) -> bool:
     return _text(record).strip() == INTERRUPT_MARKER
 
 
-def _terminal_answers(records: list[dict[str, Any]]) -> list[tuple[int, str, dict[str, Any]]]:
+def _terminal_answers(records: list[dict[str, Any]], preceded: frozenset[str] = frozenset()) -> list[tuple[int, str, dict[str, Any]]]:
     """(position, message.id, last line) per distinct terminal answer, transcript order.
 
     One model message may span several lines; it counts once, at the line that
-    carries its terminal stop_reason.
+    carries its terminal stop_reason. `preceded` names messages that were already
+    terminal BEFORE these records: when `records` is a suffix of a transcript, a copy
+    of such a line inside the suffix is not a new answer, exactly as it would not be
+    when the whole file is read.
     """
-    seen: set[str] = set()
+    seen: set[str] = set(preceded)
     out: list[tuple[int, str, dict[str, Any]]] = []
     for position, record in enumerate(records):
         if record.get("type") != "assistant":
@@ -214,14 +217,22 @@ def _prompt_id_of(record: dict[str, Any], by_uuid: dict[str, dict[str, Any]]) ->
     raise ExchangeError("parent_chain_unbounded")
 
 
-def resolve_anchor(records: list[dict[str, Any]], prompt_id: str, answer_text: str) -> str:
+def is_terminal_answer(record: dict[str, Any], message_id: str) -> bool:
+    """Whether this one record is the terminal line of message `message_id`."""
+    if record.get("type") != "assistant":
+        return False
+    message = record.get("message") or {}
+    return message.get("id") == message_id and message.get("stop_reason") in TERMINAL_STOP_REASONS
+
+
+def resolve_anchor(records: list[dict[str, Any]], prompt_id: str, answer_text: str, preceded: frozenset[str] = frozenset()) -> str:
     """The message.id of the one terminal answer this Stop closes.
 
     Declines rather than guesses: no terminal answer for the prompt yet, several of
     them, or an answer whose transcript text disagrees with the Stop payload.
     """
     by_uuid = {r["uuid"]: r for r in records if isinstance(r.get("uuid"), str)}
-    matches = [message_id for _, message_id, record in _terminal_answers(records) if _prompt_id_of(record, by_uuid) == prompt_id]
+    matches = [message_id for _, message_id, record in _terminal_answers(records, preceded) if _prompt_id_of(record, by_uuid) == prompt_id]
     if not matches:
         raise ExchangeError("answer_not_in_transcript")
     if len(matches) > 1:
@@ -232,9 +243,9 @@ def resolve_anchor(records: list[dict[str, Any]], prompt_id: str, answer_text: s
     return anchor
 
 
-def exchange_for(records: list[dict[str, Any]], answer_id: str) -> Exchange:
+def exchange_for(records: list[dict[str, Any]], answer_id: str, preceded: frozenset[str] = frozenset()) -> Exchange:
     """Build the exchange that ends at terminal answer `answer_id`."""
-    every = _terminal_answers(records)
+    every = _terminal_answers(records, preceded)
     anchor_entry = next((entry for entry in every if entry[1] == answer_id), None)
     if anchor_entry is None:
         raise ExchangeError("answer_not_in_transcript")
@@ -298,23 +309,31 @@ def iter_dicts(records: Iterable[Any]) -> list[dict[str, Any]]:
     return [r for r in records if isinstance(r, dict)]
 
 
-def window_covers(records: list[dict[str, Any]], prompt_id: str) -> bool:
-    """Whether `records`, a suffix of a transcript that begins at or before the first
-    record of `prompt_id`'s turn, also holds the start of that turn's input span.
+def window_needs(records: list[dict[str, Any]], prompt_id: str, preceded: frozenset[str] = frozenset()) -> tuple[bool, tuple[str, ...]]:
+    """What a suffix of a transcript still needs before it can stand in for the file.
 
-    The span starts after the previous terminal answer on the answer's own chain, so
-    the suffix is enough once that answer is inside it. With no answer for the prompt
-    yet, or several, the verdict is already what the whole file would give (see
-    musubi_claude_window), and nothing more needs reading.
+    `records` begins at or before the first record of `prompt_id`'s turn. Returns
+    (covered, deciding): `covered` is whether the suffix holds the start of the turn's
+    input span, which is the previous terminal answer on the answer's own chain;
+    `deciding` is the message ids whose standing as terminal answers settles the
+    verdict, namely every answer for the prompt and that previous answer. The caller
+    must establish, for each deciding id, whether it was already terminal before the
+    suffix (`preceded`) and ask again, because dropping a copy can change both values.
+
+    With no answer for the prompt, the verdict is "not yet" whatever came before.
     """
     by_uuid = {r["uuid"]: r for r in records if isinstance(r.get("uuid"), str)}
-    every = _terminal_answers(records)
+    every = _terminal_answers(records, preceded)
     anchors = [entry for entry in every if _prompt_id_of(entry[2], by_uuid) == prompt_id]
+    deciding = [message_id for _, message_id, _ in anchors]
     if len(anchors) != 1:
-        return True
+        return True, tuple(deciding)
     position, _, anchor = anchors[0]
     sidechain = bool(anchor.get("isSidechain"))
-    return any(earlier < position and bool(record.get("isSidechain")) == sidechain for earlier, _, record in every)
+    earlier = [entry for entry in every if entry[0] < position and bool(entry[2].get("isSidechain")) == sidechain]
+    if not earlier:
+        return False, tuple(deciding)
+    return True, tuple([*deciding, earlier[-1][1]])
 
 
 # --- Envelope projection (harness >= 1.7.0) -------------------------------------------
