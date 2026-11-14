@@ -147,16 +147,17 @@ def test_a_turn_that_resolves_nothing_never_reaches_the_drain(monkeypatch: pytes
 
 def test_loads_count_each_real_read_and_the_line_adds_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     reads: list[str] = []
-    original = Path.read_text
+    original = Path.open
 
-    def counting(self: Path, *args: Any, **kwargs: Any) -> str:
+    # The transcript is opened once per load and read as a window (musubi_claude_window).
+    def counting(self: Path, *args: Any, **kwargs: Any) -> Any:
         if self.name == "transcript.jsonl":
             reads.append(self.name)
         return original(self, *args, **kwargs)
 
     def prepare(stop: Any) -> None:
         stop.POLL_INTERVAL_SECONDS = 0.0
-        monkeypatch.setattr(Path, "read_text", counting)
+        monkeypatch.setattr(Path, "open", counting)
 
     payload = unanswered(tmp_path)
     run(monkeypatch, tmp_path, completed(rows("verified")), payload=payload, prepare=prepare)

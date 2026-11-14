@@ -298,6 +298,25 @@ def iter_dicts(records: Iterable[Any]) -> list[dict[str, Any]]:
     return [r for r in records if isinstance(r, dict)]
 
 
+def window_covers(records: list[dict[str, Any]], prompt_id: str) -> bool:
+    """Whether `records`, a suffix of a transcript that begins at or before the first
+    record of `prompt_id`'s turn, also holds the start of that turn's input span.
+
+    The span starts after the previous terminal answer on the answer's own chain, so
+    the suffix is enough once that answer is inside it. With no answer for the prompt
+    yet, or several, the verdict is already what the whole file would give (see
+    musubi_claude_window), and nothing more needs reading.
+    """
+    by_uuid = {r["uuid"]: r for r in records if isinstance(r.get("uuid"), str)}
+    every = _terminal_answers(records)
+    anchors = [entry for entry in every if _prompt_id_of(entry[2], by_uuid) == prompt_id]
+    if len(anchors) != 1:
+        return True
+    position, _, anchor = anchors[0]
+    sidechain = bool(anchor.get("isSidechain"))
+    return any(earlier < position and bool(record.get("isSidechain")) == sidechain for earlier, _, record in every)
+
+
 # --- Envelope projection (harness >= 1.7.0) -------------------------------------------
 
 EXCHANGE_VERSION = "v1"
