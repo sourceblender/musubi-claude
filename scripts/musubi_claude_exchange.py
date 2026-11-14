@@ -298,6 +298,40 @@ def iter_dicts(records: Iterable[Any]) -> list[dict[str, Any]]:
     return [r for r in records if isinstance(r, dict)]
 
 
+def window_needs(records: list[dict[str, Any]], prompt_id: str) -> tuple[bool, tuple[str, ...]]:
+    """What a suffix of a transcript still needs before it can stand in for the file.
+
+    `records` begins at or before the first record of `prompt_id`'s turn. Returns
+    (covered, deciding):
+
+    - `covered` is whether the suffix holds the start of the turn's input span, which
+      is the previous terminal answer on the answer's own chain.
+    - `deciding` is the message ids the verdict rests on: every terminal answer for the
+      prompt, and that previous answer.
+
+    Everything this module does with a message, it does across ALL of the message's
+    lines: a terminal answer counts once, at its first terminal line, and an answer's
+    text is every text block that carries its id. So the suffix stands in for the file
+    only when it holds every line that names a deciding id. The caller extends the
+    suffix until it does and asks again, because a longer suffix can change which ids
+    decide.
+
+    With no answer for the prompt, the verdict is "not yet" whatever came before.
+    """
+    by_uuid = {r["uuid"]: r for r in records if isinstance(r.get("uuid"), str)}
+    every = _terminal_answers(records)
+    anchors = [entry for entry in every if _prompt_id_of(entry[2], by_uuid) == prompt_id]
+    deciding = [message_id for _, message_id, _ in anchors]
+    if len(anchors) != 1:
+        return True, tuple(deciding)
+    position, _, anchor = anchors[0]
+    sidechain = bool(anchor.get("isSidechain"))
+    earlier = [entry for entry in every if entry[0] < position and bool(entry[2].get("isSidechain")) == sidechain]
+    if not earlier:
+        return False, tuple(deciding)
+    return True, tuple([*deciding, earlier[-1][1]])
+
+
 # --- Envelope projection (harness >= 1.7.0) -------------------------------------------
 
 EXCHANGE_VERSION = "v1"

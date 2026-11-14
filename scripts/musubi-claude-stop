@@ -46,6 +46,7 @@ from musubi_claude_exchange import (
 import musubi_claude_binding as binding
 from musubi_claude_pending import Candidate, expired, load, load_all, remove, save
 import musubi_claude_timeline as timeline
+from musubi_claude_turn import load_turn
 from musubi_claude_runtime import (
     RuntimeConfig,
     RuntimeConfigError,
@@ -188,14 +189,20 @@ def candidate_from_hook(hook: dict[str, Any]) -> Candidate:
     )
 
 
-def _load_records(transcript_path: str) -> list[dict[str, Any]]:
+def _parse(lines: list[str]) -> list[dict[str, Any]]:
+    return iter_dicts(_records(lines))
+
+
+def _load_records(transcript_path: str, prompt_id: str) -> list[dict[str, Any]]:
+    """The records one exchange is resolved from: the turn `prompt_id` names, back to
+    the previous terminal answer on its chain, and every line of the messages that
+    decide it. Not the whole transcript (musubi_claude_turn)."""
     started = time.monotonic()
     try:
         try:
-            lines = Path(transcript_path).read_text(encoding="utf-8").splitlines()
+            return load_turn(transcript_path, prompt_id, _parse)
         except OSError as exc:
             raise AdapterError("transcript_unreadable") from exc
-        return iter_dicts(_records(lines))
     finally:
         _timeline.note_load(time.monotonic() - started)
 
@@ -206,7 +213,7 @@ def envelope_for(candidate: Candidate) -> dict[str, Any]:
     ExchangeError("answer_not_in_transcript") means "not yet", and the caller keeps the
     candidate. Every other ExchangeError is definitive for this transcript.
     """
-    records = _load_records(candidate.transcript_path)
+    records = _load_records(candidate.transcript_path, candidate.prompt_id)
     answer_id = resolve_anchor(records, candidate.prompt_id, candidate.answer_text)
     exchange = exchange_for(records, answer_id)
     # Bind to the Stop's own session: a stale transcript_path must not yield a healthy
